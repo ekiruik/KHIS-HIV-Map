@@ -1,0 +1,8 @@
+.Renviron
+.Rhistory
+.RData
+.Rproj.user/
+outputs/
+*.xlsx
+candidates_*.csv
+*_files/
