@@ -78,13 +78,13 @@ map_level   <- 2              # 2 = County, 3 = Sub-county
 end_period  <- "202610"       # latest reporting month (Oct 2026)
 n_months    <- 12             # months available in the time filter
 rate_target <- 90             # reporting-rate target (%) shown on charts
-map_title   <- "Kenya HIV Service Reporting by County"   # main title on the map
+map_title   <- "County-Level HIV Service Provision in Kenya"   # main title on the map
 
-# Boundaries: "auto" = KHIS boundaries, falling back to geoBoundaries (open data) if KHIS
-# has no/too few shapes; "khis" or "geoboundaries" to force one.
-geometry_source <- "auto"
-gb_url <- paste0("https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/gbOpen/",
-                 "KEN/ADM1/geoBoundaries-KEN-ADM1_simplified.geojson")
+# All data AND county boundaries come from KHIS only (no basemap / tile services).
+# Water bodies (Lake Victoria, Lake Turkana, other lakes, Indian Ocean) are drawn from
+# Natural Earth physical layers (public domain, no attribution needed), downloaded once
+# and cached in outputs/natural_earth. Set add_water <- FALSE to switch off.
+add_water <- TRUE
 
 out_dir  <- "outputs"
 dir.create(out_dir, showWarnings = FALSE)
@@ -248,23 +248,12 @@ features <- compact(lapply(ous, function(o) {
                          parent = if (is.null(o$parent$name)) "" else o$parent$name),
        geometry = g)
 }))
-use_gb <- geometry_source == "geoboundaries" ||
-          (geometry_source == "auto" && length(features) < 0.9 * length(ous))
-
-if (!use_gb) {
-  if (!length(features)) stop("KHIS returned no polygon geometry for level ", map_level)
-  shp <- st_read(toJSON(list(type = "FeatureCollection", features = features),
-                        auto_unbox = TRUE, digits = NA), quiet = TRUE)
-  message("Boundaries: KHIS (", length(features), " of ", length(ous), " org units have shapes)")
-} else {
-  if (map_level != 2) stop("Open-data fallback boundaries are available for counties only (map_level = 2).")
-  message("Boundaries: geoBoundaries Kenya counties (KHIS shapes missing/incomplete)")
-  norm <- function(x) gsub("[^a-z]", "", tolower(str_remove_all(x, regex("county|city", ignore_case = TRUE))))
-  gb <- st_read(gb_url, quiet = TRUE) |> mutate(key = norm(shapeName)) |> select(key)
-  shp <- inner_join(gb, mutate(ou_tbl, key = norm(ou_name)), by = "key") |> select(-key)
-  miss <- setdiff(ou_tbl$ou_name, shp$ou_name)
-  if (length(miss)) warning("No boundary matched for: ", paste(miss, collapse = ", "))
-}
+if (length(features) < length(ous))
+  warning(length(ous) - length(features), " org unit(s) have no boundary in KHIS and will not be drawn.")
+if (!length(features)) stop("KHIS returned no polygon geometry for level ", map_level)
+shp <- st_read(toJSON(list(type = "FeatureCollection", features = features),
+                      auto_unbox = TRUE, digits = NA), quiet = TRUE)
+message("Boundaries: KHIS (", length(features), " of ", length(ous), " org units)")
 shp <- shp |>
   st_make_valid() |>
   st_simplify(preserveTopology = TRUE, dTolerance = 0.003) |>
@@ -280,6 +269,58 @@ kbb     <- st_bbox(shp)
 mask    <- st_difference(st_as_sfc(st_bbox(c(xmin = kbb[["xmin"]] - 25, ymin = kbb[["ymin"]] - 25,
                                              xmax = kbb[["xmax"]] + 25, ymax = kbb[["ymax"]] + 25),
                                            crs = st_crs(shp))), kenya)
+
+# ---- 4b. WATER: lakes + Indian Ocean (Natural Earth, public domain) ----------
+lakes <- NULL; ocean <- NULL
+if (add_water) {
+  if (!requireNamespace("rnaturalearth", quietly = TRUE)) install.packages("rnaturalearth")
+  ne_dir <- file.path(out_dir, "natural_earth"); dir.create(ne_dir, showWarnings = FALSE)
+  ne_get <- function(type) {
+    for (sc in c(10, 50)) {
+      x <- tryCatch(suppressMessages(suppressWarnings(
+             rnaturalearth::ne_load(scale = sc, type = type, category = "physical",
+                                    destdir = ne_dir, returnclass = "sf"))),
+           error = function(e) tryCatch(suppressMessages(suppressWarnings(
+             rnaturalearth::ne_download(scale = sc, type = type, category = "physical",
+                                        destdir = ne_dir, returnclass = "sf"))),
+           error = function(e2) NULL))
+      if (!is.null(x)) return(x)
+    }
+    warning("Could not load Natural Earth '", type, "' — map drawn without it."); NULL
+  }
+  water_box <- st_as_sfc(st_bbox(c(xmin = kbb[["xmin"]] - 6, ymin = kbb[["ymin"]] - 6,
+                                   xmax = kbb[["xmax"]] + 6, ymax = kbb[["ymax"]] + 6),
+                                 crs = st_crs(4326)))
+  crop_to <- function(x) {
+    if (is.null(x)) return(NULL)
+    x <- st_make_valid(st_transform(x, 4326))
+    x <- suppressWarnings(st_intersection(x, water_box))
+    x <- x[!st_is_empty(x), ]
+    if (!nrow(x)) return(NULL)
+    st_simplify(x, preserveTopology = TRUE, dTolerance = 0.005)
+  }
+  message("Adding lakes and Indian Ocean ...")
+  lakes <- crop_to(ne_get("lakes"))
+  ocean <- crop_to(ne_get("ocean"))
+  if (!is.null(lakes)) {
+    nm <- intersect(c("name_en", "name", "NAME"), names(lakes))[1]
+    lakes$lake_name <- if (is.na(nm)) "" else as.character(lakes[[nm]])
+    lakes$lake_name[is.na(lakes$lake_name)] <- ""
+    lakes <- lakes[, "lake_name"]
+  }
+}
+# Text labels for water bodies and neighbouring countries (fixed positions)
+geo_labels <- tribble(
+  ~label,            ~lng,  ~lat,  ~type,
+  "INDIAN OCEAN",    42.30, -3.40, "water",
+  "Lake Victoria",   33.25, -0.75, "water",
+  "Lake Turkana",    36.05,  3.55, "water",
+  "UGANDA",          33.15,  1.75, "country",
+  "SOUTH SUDAN",     33.40,  4.95, "country",
+  "ETHIOPIA",        38.80,  5.05, "country",
+  "SOMALIA",         42.55,  2.10, "country",
+  "TANZANIA",        35.40, -3.75, "country"
+)
 message(nrow(shp), " polygons loaded.")
 
 # ---- 5. PULL REPORTING DATA --------------------------------------------------
@@ -415,6 +456,7 @@ map_css <- "
 .kh-sw{display:inline-block;width:16px;height:11px;margin-right:6px;border-radius:2px;vertical-align:middle}
 .kh-list td{padding:1px 6px 1px 0}
 .leaflet-popup-content{margin:10px 12px}
+.leaflet-container{background:#e9eff5}
 .kh-title{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1000;
   pointer-events:none;text-align:center;background:rgba(255,255,255,.96);padding:9px 22px 8px;
   border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.2);border-bottom:4px solid #1F4E79;
@@ -433,6 +475,7 @@ map_css <- "
 map_js <- "
 function(el, x, D) {
   var map = this, ous = D.ous, names = D.names, NA_COL = '#D9D9D9';
+  if (map.attributionControl) map.attributionControl.setPrefix('Source: KHIS (DHIS2) · NASCOP');
   var RB = [0, 50, 80, 90, 95], RC = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'];
   var RL = ['< 50%', '50 – 79%', '80 – 89%', '90 – 94%', '95% +'];
   var st = {s: 0, m: 0, p: 0}, ALL = D.periods.length - 1;
@@ -685,20 +728,37 @@ north_html <- paste0("<div class='kh-card' style='padding:4px 8px;text-align:cen
                      "<div style='font-size:16px;color:", navy, "'>&#9650;</div>",
                      "<div style='font-weight:800;font-size:12px;color:", navy, "'>N</div></div>")
 
+water_col <- "#BFD9EE"; water_line <- "#7FAFD6"; water_txt <- "#2F6E9F"
 m <- leaflet(shp, options = leafletOptions(zoomSnap = 0.25, zoomDelta = 0.5, minZoom = 5)) |>
-  addProviderTiles(providers$CartoDB.Positron,  group = "Light") |>
-  addProviderTiles(providers$Esri.WorldTopoMap, group = "Terrain") |>
-  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
-  addProviderTiles(providers$OpenStreetMap,     group = "Street") |>
+  addMapPane("bg",    zIndex = 390) |>     # mask + ocean   (below counties)
+  addMapPane("water", zIndex = 420) |>     # lakes          (above counties)
+  addMapPane("edge",  zIndex = 430) |>     # Kenya border
   addPolygons(data = mask, fillColor = "white", fillOpacity = 0.6, stroke = FALSE,
-              options = pathOptions(pointerEvents = "none")) |>
-  addPolygons(layerId = ~ou_uid, fillColor = "#D9D9D9", fillOpacity = 0.88,
-              color = "white", weight = 1) |>
+              options = pathOptions(pane = "bg", pointerEvents = "none"))
+if (!is.null(ocean)) m <- m |>
+  addPolygons(data = ocean, fillColor = water_col, fillOpacity = 1, color = water_line,
+              weight = 0.8, options = pathOptions(pane = "bg", pointerEvents = "none"))
+m <- m |>
+  addPolygons(data = shp, layerId = ~ou_uid, fillColor = "#D9D9D9", fillOpacity = 0.88,
+              color = "white", weight = 1)
+if (!is.null(lakes)) m <- m |>
+  addPolygons(data = lakes, fillColor = water_col, fillOpacity = 1, color = water_line,
+              weight = 0.8, options = pathOptions(pane = "water", pointerEvents = "none"))
+m <- m |>
   addPolylines(data = outline, color = navy, weight = 2.5, opacity = 1,
-               options = pathOptions(pointerEvents = "none")) |>
+               options = pathOptions(pane = "edge", pointerEvents = "none")) |>
+  addLabelOnlyMarkers(data = filter(geo_labels, type == "water"), lng = ~lng, lat = ~lat, label = ~label,
+                      labelOptions = labelOptions(noHide = TRUE, textOnly = TRUE, direction = "center",
+                        style = list("color" = water_txt, "font-style" = "italic", "font-size" = "12px",
+                                     "font-weight" = "600", "letter-spacing" = "0.04em",
+                                     "font-family" = "Segoe UI, Arial, sans-serif",
+                                     "text-shadow" = "0 0 3px #fff, 0 0 3px #fff"))) |>
+  addLabelOnlyMarkers(data = filter(geo_labels, type == "country"), lng = ~lng, lat = ~lat, label = ~label,
+                      labelOptions = labelOptions(noHide = TRUE, textOnly = TRUE, direction = "center",
+                        style = list("color" = "#8a94a0", "font-size" = "11px", "font-weight" = "700",
+                                     "letter-spacing" = "0.12em",
+                                     "font-family" = "Segoe UI, Arial, sans-serif"))) |>
   addControl(HTML(title_html), position = "topleft") |>
-  addLayersControl(baseGroups = c("Light", "Terrain", "Satellite", "Street"), position = "topleft",
-                   options = layersControlOptions(collapsed = TRUE)) |>
   addControl(HTML(north_html), position = "topleft") |>
   addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) |>
   addEasyButton(easyButton(icon = "fa-globe", title = "Reset view", onClick = JS(fit_js))) |>
@@ -711,10 +771,10 @@ m <- leaflet(shp, options = leafletOptions(zoomSnap = 0.25, zoomDelta = 0.5, min
 print(m)   # view in RStudio Viewer
 
 tryCatch(
-  saveWidget(m, out_html, selfcontained = TRUE, title = "Kenya HIV Service Reporting — KHIS"),
+  saveWidget(m, out_html, selfcontained = TRUE, title = "County-Level HIV Service Provision in Kenya"),
   error = function(e) {
     message("Pandoc not found — saving non-self-contained version (keep the _files folder with it).")
-    saveWidget(m, out_html, selfcontained = FALSE, title = "Kenya HIV Service Reporting — KHIS")
+    saveWidget(m, out_html, selfcontained = FALSE, title = "County-Level HIV Service Provision in Kenya")
   })
 message("Map saved: ", normalizePath(out_html))
 
