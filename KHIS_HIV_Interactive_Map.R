@@ -1,6 +1,7 @@
 # =============================================================================
 #  KHIS HIV INTERACTIVE SPATIAL MAP — KENYA
-#  Indicators : Currently on ART (as at Oct 2026) | HTS tests done
+#  Indicators : Currently on ART (as at Oct 2026) | HTS tests done |
+#               MOH 731 (2023 version) facilities reporting + reporting rate
 #  Source     : KHIS (DHIS2) https://hiskenya.dha.go.ke  — Analytics API
 #  Geometry   : KHIS org-unit boundaries (joined by org-unit UID, no name matching)
 #  Output     : Self-contained interactive HTML map + Excel table
@@ -92,7 +93,15 @@ indicators <- tribble(
   # "prep_new",   "PrEP: Newly initiated",      "flow",       "PrEP",    NA,               "new|initiat",                  NA,
   # "vtp_tested", "VTP: Pregnant/BF tested",    "flow",       "HV02",    "test",           "total",                        NA
 )
-indicators$uid <- as.character(indicators$uid)
+indicators$uid   <- as.character(indicators$uid)
+indicators$layer <- TRUE          # TRUE = shown as a map layer
+
+# MOH 731 reporting — facilities that submitted the MOH 731 (2023 version) form
+add_reporting  <- TRUE
+ds_uid         <- NA              # paste the MOH 731 (2023) dataset UID to force it
+ds_search      <- "731"           # dataset name search in KHIS
+ds_prefer      <- "2023"          # pick the dataset whose name contains this
+report_period  <- stock_period    # reporting month (Oct 2026)
 
 navy      <- "#1F4E79"
 navy_ramp <- c("#DEEBF7", "#9ECAE1", "#4292C6", "#2171B5", "#1F4E79")
@@ -259,6 +268,41 @@ indicators$uid <- pmap_chr(
   resolve_uid
 )
 
+# ---- 2b. MOH 731 (2023) DATASET — facilities reporting ----------------------
+if (add_reporting) {
+  if (is.na(ds_uid) || !nzchar(ds_uid)) {
+    ds <- dhis_get("dataSets", list(filter = paste0("name:ilike:", ds_search),
+                                    fields = "id,name,periodType", paging = "false"))$dataSets
+    if (!NROW(ds)) stop("No KHIS dataset found with '", ds_search, "' in its name. Change ds_search.")
+    ds <- as_tibble(ds) |>
+      mutate(pref    = str_detect(name, regex(ds_prefer, ignore_case = TRUE)),
+             monthly = periodType == "Monthly") |>
+      arrange(desc(pref), desc(monthly), nchar(name))
+    cat("\n", strrep("=", 75), "\n  MOH 731 datasets found in KHIS:\n", sep = "")
+    cat(sprintf("   %s %s  (%s, %s)\n", ifelse(seq_len(nrow(ds)) == 1, "->", "  "),
+                ds$name, ds$id, ds$periodType), sep = "")
+    if (!ds$pref[1]) warning("No dataset name contains '", ds_prefer, "'. Using: ", ds$name[1])
+    ds_uid  <- ds$id[1]
+    ds_name <- ds$name[1]
+    cat("  If wrong: paste the right UID into ds_uid in the config.\n", strrep("=", 75), "\n", sep = "")
+  } else {
+    ds_name <- dhis_get(paste0("dataSets/", ds_uid), list(fields = "name"))$name
+  }
+  cat("MOH 731 dataset used:", ds_name, "(", ds_uid, ")\n")
+
+  indicators <- bind_rows(indicators, tibble(
+    key         = c("rep_actual", "rep_expected"),
+    label       = c("MOH 731 (2023): facilities reporting", "MOH 731 (2023): facilities expected"),
+    period_type = "report",
+    uid         = paste0(ds_uid, c(".ACTUAL_REPORTS", ".EXPECTED_REPORTS")),
+    layer       = c(TRUE, FALSE)))
+}
+
+# What is displayed (map layers / popup / title / Excel)
+show <- indicators |> select(key, label, layer)
+if (add_reporting) show <- bind_rows(show, tibble(
+  key = "rep_rate", label = "MOH 731 (2023): reporting rate (%)", layer = TRUE))
+
 # ---- 3. ORG UNITS + BOUNDARIES ----------------------------------------------
 ou_dim  <- paste0("ou:", root_ou, ";LEVEL-", map_level)
 
@@ -306,12 +350,10 @@ dx_map <- indicators |>
   mutate(uid = str_trim(uid))
 
 message("Pulling analytics ...")
-vals <- bind_rows(
-  pull_values(dx_map$uid[dx_map$period_type == "stock"], stock_period) |>
-    inner_join(filter(dx_map, period_type == "stock"), by = c("dx" = "uid")),
-  pull_values(dx_map$uid[dx_map$period_type == "flow"], flow_periods) |>
-    inner_join(filter(dx_map, period_type == "flow"),  by = c("dx" = "uid"))
-)
+pe_for <- list(stock = stock_period, flow = flow_periods, report = report_period)
+vals <- map_dfr(unique(dx_map$period_type), function(pt)
+  pull_values(dx_map$uid[dx_map$period_type == pt], pe_for[[pt]]) |>
+    inner_join(filter(dx_map, period_type == pt), by = c("dx" = "uid")))
 
 data_wide <- vals |>
   group_by(ou_uid, key) |>
@@ -326,11 +368,20 @@ map_df <- shp |>
 
 national <- map_df |> st_drop_geometry() |>
   summarise(across(all_of(indicators$key), ~ sum(.x, na.rm = TRUE)))
+
+if (add_reporting) {
+  map_df <- map_df |>
+    mutate(rep_rate = ifelse(!is.na(rep_expected) & rep_expected > 0,
+                             100 * rep_actual / rep_expected, NA_real_))
+  national$rep_rate <- with(national, ifelse(rep_expected > 0, 100 * rep_actual / rep_expected, NA_real_))
+}
 cat("\nNATIONAL TOTALS — sanity check these against what you expect:\n")
-print(as.data.frame(setNames(national, indicators$label[match(names(national), indicators$key)])))
+print(as.data.frame(setNames(national[show$key], show$label)))
 
 # ---- 5. INTERACTIVE MAP ------------------------------------------------------
-fmt <- function(x) ifelse(is.na(x), "No data", scales::comma(x, accuracy = 1))
+fmt   <- function(x) ifelse(is.na(x), "No data", scales::comma(x, accuracy = 1))
+fmt_k <- function(x, k) if (grepl("_rate$", k)) ifelse(is.na(x), "No data", sprintf("%.1f%%", x)) else fmt(x)
+fmt_v <- function(vals, keys) unlist(Map(fmt_k, vals, keys))
 
 make_pal <- function(x) {
   if (all(is.na(x))) return(NULL)
@@ -347,8 +398,8 @@ popup_html <- map_df |> st_drop_geometry() |>
   pmap_chr(function(...) {
     r <- list(...)
     rows <- paste0(
-      "<tr><td style='padding:2px 10px 2px 0'>", indicators$label, "</td>",
-      "<td style='text-align:right'><b>", fmt(unlist(r[indicators$key])), "</b></td></tr>",
+      "<tr><td style='padding:2px 10px 2px 0'>", show$label, "</td>",
+      "<td style='text-align:right'><b>", fmt_v(r[show$key], show$key), "</b></td></tr>",
       collapse = "")
     paste0("<div style='font-family:Segoe UI,Arial;font-size:12px'>",
            "<div style='color:", navy, ";font-size:14px;font-weight:700'>", r$ou_name, "</div>",
@@ -368,10 +419,13 @@ title_html <- paste0(
   "<div style='font-size:16px;font-weight:700;color:", navy, "'>Kenya HIV Programme — KHIS</div>",
   "<div style='font-size:11px;color:#555'>On ART as at ",
   format(as.Date(paste0(stock_period, "01"), "%Y%m%d"), "%b %Y"),
-  " | HTS: ", per_lab, "</div>",
+  " | HTS: ", per_lab,
+  if (add_reporting) paste0(" | MOH 731 reporting: ",
+                            format(as.Date(paste0(report_period, "01"), "%Y%m%d"), "%b %Y")) else "",
+  "</div>",
   "<table style='font-size:12px;margin-top:4px'>",
-  paste0("<tr><td style='padding-right:10px'>", indicators$label, "</td><td style='text-align:right'><b>",
-         fmt(unlist(national[indicators$key])), "</b></td></tr>", collapse = ""),
+  paste0("<tr><td style='padding-right:10px'>", show$label, "</td><td style='text-align:right'><b>",
+         fmt_v(as.list(national[show$key]), show$key), "</b></td></tr>", collapse = ""),
   "</table><div style='font-size:10px;color:#888;margin-top:4px'>Source: KHIS (DHIS2), extracted ",
   format(Sys.Date(), "%d %b %Y"), "</div></div>")
 
@@ -379,9 +433,10 @@ m <- leaflet(map_df, options = leafletOptions(zoomSnap = 0.25, zoomDelta = 0.5))
   addProviderTiles(providers$CartoDB.Positron, group = "Light") |>
   addProviderTiles(providers$OpenStreetMap,    group = "Street")
 
-for (i in seq_len(nrow(indicators))) {
-  k   <- indicators$key[i]
-  lab <- indicators$label[i]
+layers <- filter(show, layer)
+for (i in seq_len(nrow(layers))) {
+  k   <- layers$key[i]
+  lab <- layers$label[i]
   v   <- map_df[[k]]
   pal <- make_pal(v)
   if (is.null(pal)) {
@@ -392,18 +447,19 @@ for (i in seq_len(nrow(indicators))) {
     addPolygons(
       fillColor = pal(v), fillOpacity = 0.8, color = "white", weight = 1,
       group = lab, popup = popup_html,
-      label = lapply(sprintf("<b>%s</b><br>%s: %s", map_df$ou_name, lab, fmt(v)), HTML),
+      label = lapply(sprintf("<b>%s</b><br>%s: %s", map_df$ou_name, lab, fmt_k(v, k)), HTML),
       labelOptions = labelOptions(textsize = "12px", direction = "auto"),
       highlightOptions = highlightOptions(weight = 3, color = navy, fillOpacity = 0.95,
                                           bringToFront = TRUE)) |>
     addLegend(pal = pal, values = v, title = paste0(lab, "<br><small>by ", area_lab, "</small>"),
               position = "bottomright", opacity = 0.9,
               className = paste0("info legend leg-", k),
-              labFormat = labelFormat(big.mark = ",", digits = 0))
+              labFormat = if (grepl("_rate$", k)) labelFormat(suffix = "%", digits = 0)
+                          else labelFormat(big.mark = ",", digits = 0))
 }
 
 m <- m |>
-  addLayersControl(baseGroups = indicators$label, overlayGroups = c("Light", "Street"),
+  addLayersControl(baseGroups = layers$label, overlayGroups = c("Light", "Street"),
                    options = layersControlOptions(collapsed = FALSE)) |>
   hideGroup("Street") |>
   addControl(HTML(title_html), position = "topleft") |>
@@ -421,7 +477,7 @@ m <- m |>
       }
       showLegend(Object.keys(data)[0]);
       map.on('baselayerchange', function(e){ showLegend(e.name); });
-    }", data = setNames(as.list(indicators$key), indicators$label))
+    }", data = setNames(as.list(layers$key), layers$label))
 
 print(m)   # view in RStudio Viewer
 
@@ -435,12 +491,12 @@ message("Map saved: ", normalizePath(out_html))
 
 # ---- 6. EXCEL TABLE ----------------------------------------------------------
 tbl <- map_df |> st_drop_geometry() |>
-  select(ou_uid, ou_name, any_of("parent"), all_of(indicators$key))
+  select(ou_uid, ou_name, any_of("parent"), all_of(show$key))
 if (map_level == 2) tbl <- select(tbl, -any_of("parent"))
-names(tbl) <- c("OU UID", area_lab, if (map_level > 2) "County", indicators$label)
+names(tbl) <- c("OU UID", area_lab, if (map_level > 2) "County", show$label)
 tot_row <- as_tibble(setNames(c(list(NA_character_, "KENYA"),
                                  if (map_level > 2) list(NA_character_),
-                                 as.list(unlist(national[indicators$key]))), names(tbl)))
+                                 as.list(unlist(national[show$key]))), names(tbl)))
 tbl <- bind_rows(tbl, tot_row)
 
 wb <- createWorkbook()
@@ -448,16 +504,19 @@ addWorksheet(wb, "Map data")
 hs <- createStyle(fontColour = "white", fgFill = navy, textDecoration = "bold",
                   halign = "center", wrapText = TRUE, border = "TopBottomLeftRight")
 writeData(wb, 1, tbl, headerStyle = hs)
-num_cols <- which(names(tbl) %in% indicators$label)
+num_cols  <- which(names(tbl) %in% show$label)
+rate_cols <- which(names(tbl) %in% show$label[grepl("_rate$", show$key)])
 addStyle(wb, 1, createStyle(numFmt = "#,##0"), rows = 2:(nrow(tbl) + 1),
          cols = num_cols, gridExpand = TRUE)
 addStyle(wb, 1, createStyle(textDecoration = "bold", fgFill = "#DEEBF7", numFmt = "#,##0"),
          rows = nrow(tbl) + 1, cols = seq_along(tbl), gridExpand = TRUE, stack = TRUE)
+if (length(rate_cols)) addStyle(wb, 1, createStyle(numFmt = "0.0"), rows = 2:(nrow(tbl) + 1),
+                                cols = rate_cols, gridExpand = TRUE, stack = TRUE)
 setColWidths(wb, 1, cols = seq_along(tbl), widths = c(14, 20, if (map_level > 2) 18, rep(18, length(num_cols))))
 freezePane(wb, 1, firstRow = TRUE)
 addWorksheet(wb, "Indicator UIDs")
-writeData(wb, 2, indicators |> mutate(periods = ifelse(period_type == "stock", stock_period,
-                                                        paste(flow_periods, collapse = ";"))),
+writeData(wb, 2, indicators |> mutate(periods = vapply(period_type, function(pt)
+                                         paste(pe_for[[pt]], collapse = ";"), character(1))),
           headerStyle = hs)
 saveWorkbook(wb, out_xlsx, overwrite = TRUE)
 message("Table saved: ", normalizePath(out_xlsx))
