@@ -1,7 +1,8 @@
 # =============================================================================
 #  KHIS HIV INTERACTIVE SPATIAL MAP — KENYA
 #  Indicators : Currently on ART (as at Oct 2026) | HTS tests done |
-#               MOH 731 (2023 version) facilities reporting + reporting rate
+#               MOH 731 (2023 version) facilities reporting + reporting rate +
+#               ALL MOH 731 (2023) data elements (searchable selector)
 #  Source     : KHIS (DHIS2) https://hiskenya.dha.go.ke  — Analytics API
 #  Geometry   : KHIS org-unit boundaries (joined by org-unit UID, no name matching)
 #  Output     : Self-contained interactive HTML map + Excel table
@@ -102,6 +103,7 @@ ds_uid         <- NA              # paste the MOH 731 (2023) dataset UID to forc
 ds_search      <- "731"           # dataset name search in KHIS
 ds_prefer      <- "2023"          # pick the dataset whose name contains this
 report_period  <- stock_period    # reporting month (Oct 2026)
+add_all_731    <- TRUE            # add EVERY MOH 731 (2023) data element to the map selector
 
 navy      <- "#1F4E79"
 navy_ramp <- c("#DEEBF7", "#9ECAE1", "#4292C6", "#2171B5", "#1F4E79")
@@ -378,34 +380,85 @@ if (add_reporting) {
 cat("\nNATIONAL TOTALS — sanity check these against what you expect:\n")
 print(as.data.frame(setNames(national[show$key], show$label)))
 
+# ---- 4b. ALL MOH 731 (2023) DATA ELEMENTS ------------------------------------
+des     <- tibble(id = character(), name = character(), section = character())
+de_wide <- tibble(ou_uid = character())
+if (add_reporting && add_all_731) {
+  message("Reading MOH 731 dataset structure ...")
+  dsm <- dhis_get(paste0("dataSets/", ds_uid),
+                  list(fields = paste0("dataSetElements[dataElement[id,name,code]],",
+                                       "sections[name,sortOrder,dataElements[id]]")),
+                  simplify = FALSE)
+  des <- map_dfr(dsm$dataSetElements, function(x)
+    tibble(id = x$dataElement$id, name = x$dataElement$name,
+           code = x$dataElement$code %||% NA_character_))
+  if (length(dsm$sections)) {
+    sec_map <- map_dfr(dsm$sections, function(sc) {
+      ids <- vapply(sc$dataElements, function(d) d$id, character(1))
+      if (!length(ids)) return(NULL)
+      tibble(id = ids, section = sc$name,
+             sec_order = as.numeric(sc$sortOrder %||% 999), de_order = seq_along(ids))
+    })
+    des <- left_join(des, distinct(sec_map, id, .keep_all = TRUE), by = "id")
+  } else {
+    des <- mutate(des, section = NA_character_, sec_order = NA_real_, de_order = NA_integer_)
+  }
+  des <- des |>
+    mutate(section   = coalesce(section, str_extract(name, "^[A-Za-z]{2}\\d{2}"), "Other"),
+           sec_order = coalesce(sec_order, 999), de_order = coalesce(de_order, 999L)) |>
+    arrange(sec_order, section, de_order, name)
+  message(nrow(des), " data elements in ", ds_name, " — pulling ", report_period, " ...")
+
+  chunks  <- split(des$id, ceiling(seq_along(des$id) / 40))
+  de_vals <- map_dfr(seq_along(chunks), function(i) {
+    cat(sprintf("   batch %d/%d\n", i, length(chunks)))
+    tryCatch(pull_values(chunks[[i]], report_period), error = function(e) {
+      # one bad element breaks a batch -> retry one by one
+      map_dfr(chunks[[i]], function(id) tryCatch(pull_values(id, report_period),
+                                                 error = function(e) NULL))
+    })
+  })
+  if (nrow(de_vals)) {
+    de_wide <- de_vals |>
+      group_by(ou_uid, dx) |>
+      summarise(value = sum(value, na.rm = TRUE), .groups = "drop") |>
+      pivot_wider(names_from = dx, values_from = value)
+  }
+  des <- des |>
+    filter(id %in% names(de_wide)) |>
+    mutate(national = vapply(id, function(i) sum(de_wide[[i]], na.rm = TRUE), numeric(1)))
+  cat(nrow(des), "MOH 731 data elements have data for", report_period, "\n")
+}
+
 # ---- 5. INTERACTIVE MAP ------------------------------------------------------
+# One polygon layer; a drop-down (with search box) switches between ALL indicators:
+#   Key indicators  +  every MOH 731 (2023) data element, grouped by form section
 fmt   <- function(x) ifelse(is.na(x), "No data", scales::comma(x, accuracy = 1))
 fmt_k <- function(x, k) if (grepl("_rate$", k)) ifelse(is.na(x), "No data", sprintf("%.1f%%", x)) else fmt(x)
 fmt_v <- function(vals, keys) unlist(Map(fmt_k, vals, keys))
-
-make_pal <- function(x) {
-  if (all(is.na(x))) return(NULL)
-  if (length(unique(na.omit(x))) == 1) return(colorFactor(navy, domain = unique(na.omit(x)), na.color = "#D9D9D9"))
-  br <- unique(quantile(x, probs = seq(0, 1, 0.2), na.rm = TRUE))
-  if (length(br) < 3) return(colorNumeric(navy_ramp, x, na.color = "#D9D9D9"))
-  br[1] <- floor(br[1]); br[length(br)] <- ceiling(br[length(br)])
-  colorBin(navy_ramp, x, bins = br, pretty = FALSE, na.color = "#D9D9D9")
-}
-
 area_lab <- ifelse(map_level == 2, "County", "Sub-county")
+num_vec <- function(v) unname(as.numeric(v))          # NA -> null in the browser
 
-popup_html <- map_df |> st_drop_geometry() |>
-  pmap_chr(function(...) {
-    r <- list(...)
-    rows <- paste0(
-      "<tr><td style='padding:2px 10px 2px 0'>", show$label, "</td>",
-      "<td style='text-align:right'><b>", fmt_v(r[show$key], show$key), "</b></td></tr>",
-      collapse = "")
-    paste0("<div style='font-family:Segoe UI,Arial;font-size:12px'>",
-           "<div style='color:", navy, ";font-size:14px;font-weight:700'>", r$ou_name, "</div>",
-           if (map_level > 2) paste0("<div style='color:#666'>", r$parent, "</div>") else "",
-           "<table style='margin-top:4px'>", rows, "</table></div>")
-  })
+layers   <- filter(show, layer)
+ou_order <- map_df$ou_uid
+
+vars_key <- lapply(seq_len(nrow(layers)), function(i) {
+  k <- layers$key[i]
+  list(key = k, label = layers$label[i], group = "Key indicators",
+       rate = grepl("_rate$", k),
+       values = num_vec(map_df[[k]]),
+       national = num_vec(national[[k]]))
+})
+vars_731 <- lapply(seq_len(nrow(des)), function(i) {
+  id <- des$id[i]
+  list(key = id, label = des$name[i], group = paste0("MOH 731 – ", des$section[i]),
+       rate = FALSE,
+       values = num_vec(de_wide[[id]][match(ou_order, de_wide$ou_uid)]),
+       national = des$national[i])
+})
+js_data <- list(ous = ou_order, names = map_df$ou_name, area = area_lab,
+                ramp = navy_ramp, navy = navy,
+                key_n = length(vars_key), vars = c(vars_key, vars_731))
 
 per_lab <- if (length(flow_periods) == 1) {
   format(as.Date(paste0(flow_periods, "01"), "%Y%m%d"), "%b %Y")
@@ -415,71 +468,167 @@ per_lab <- if (length(flow_periods) == 1) {
 
 title_html <- paste0(
   "<div style='background:white;padding:8px 12px;border-left:5px solid ", navy,
-  ";font-family:Segoe UI,Arial;box-shadow:0 1px 4px rgba(0,0,0,.3)'>",
+  ";font-family:Segoe UI,Arial;box-shadow:0 1px 4px rgba(0,0,0,.3);max-width:330px'>",
   "<div style='font-size:16px;font-weight:700;color:", navy, "'>Kenya HIV Programme — KHIS</div>",
   "<div style='font-size:11px;color:#555'>On ART as at ",
   format(as.Date(paste0(stock_period, "01"), "%Y%m%d"), "%b %Y"),
   " | HTS: ", per_lab,
-  if (add_reporting) paste0(" | MOH 731 reporting: ",
+  if (add_reporting) paste0(" | MOH 731: ",
                             format(as.Date(paste0(report_period, "01"), "%Y%m%d"), "%b %Y")) else "",
   "</div>",
   "<table style='font-size:12px;margin-top:4px'>",
   paste0("<tr><td style='padding-right:10px'>", show$label, "</td><td style='text-align:right'><b>",
          fmt_v(as.list(national[show$key]), show$key), "</b></td></tr>", collapse = ""),
-  "</table><div style='font-size:10px;color:#888;margin-top:4px'>Source: KHIS (DHIS2), extracted ",
+  "</table>",
+  if (nrow(des)) paste0("<div style='font-size:11px;color:#555;margin-top:4px'>",
+                        nrow(des), " MOH 731 (2023) data elements available in the selector →</div>") else "",
+  "<div style='font-size:10px;color:#888;margin-top:4px'>Source: KHIS (DHIS2), extracted ",
   format(Sys.Date(), "%d %b %Y"), "</div></div>")
+
+map_js <- "
+function(el, x, data) {
+  var map = this, vars = data.vars, ous = data.ous, names = data.names;
+  var ramp = data.ramp, NA_COL = '#D9D9D9';
+  function lyr(id) { return map.layerManager.getLayer('shape', id); }
+  function ok(v) { return v !== null && v !== undefined && !isNaN(v); }
+  function fmt(v, rate) {
+    if (!ok(v)) return 'No data';
+    return rate ? v.toFixed(1) + '%' : Math.round(v).toLocaleString('en-US');
+  }
+  function breaks(vals) {
+    var v = vals.filter(ok).sort(function(a, b) { return a - b; });
+    if (!v.length) return [];
+    var br = [];
+    for (var i = 0; i <= 5; i++) {
+      var p = i / 5 * (v.length - 1), lo = Math.floor(p), hi = Math.ceil(p);
+      br.push(v[lo] + (v[hi] - v[lo]) * (p - lo));
+    }
+    return br.filter(function(b, i, a) { return i === 0 || b > a[i - 1]; });
+  }
+  function colour(v, br) {
+    if (!ok(v)) return NA_COL;
+    if (br.length < 2) return ramp[ramp.length - 1];
+    var nb = br.length - 1;
+    for (var i = 1; i < br.length; i++) {
+      if (v <= br[i] || i === nb)
+        return ramp[Math.round((i - 1) * (ramp.length - 1) / Math.max(1, nb - 1))];
+    }
+  }
+
+  /* hover highlight (keeps the fill colour) */
+  ous.forEach(function(id) {
+    var l = lyr(id); if (!l) return;
+    l.on('mouseover', function() { this.setStyle({weight: 3, color: data.navy}); this.bringToFront(); });
+    l.on('mouseout',  function() { this.setStyle({weight: 1, color: 'white'}); });
+  });
+
+  /* legend */
+  var legend = L.control({position: 'bottomright'});
+  legend.onAdd = function() {
+    this._div = L.DomUtil.create('div', 'info legend');
+    this._div.style.cssText = 'background:white;padding:8px 10px;border-radius:4px;' +
+      'box-shadow:0 1px 4px rgba(0,0,0,.3);font:12px Segoe UI,Arial;max-width:260px';
+    return this._div;
+  };
+  legend.addTo(map);
+
+  /* selector */
+  var sel = L.control({position: 'topright'});
+  sel.onAdd = function() {
+    var d = L.DomUtil.create('div');
+    d.style.cssText = 'background:white;padding:8px;border-radius:4px;' +
+      'box-shadow:0 1px 4px rgba(0,0,0,.3);font:12px Segoe UI,Arial;width:340px';
+    d.innerHTML = '<div style=\"font-weight:700;color:' + data.navy + ';margin-bottom:4px\">Select indicator (' +
+      vars.length + ')</div>' +
+      '<input id=\"vfilter\" placeholder=\"Search e.g. HTS, PrEP, ANC, viral load...\" ' +
+      'style=\"width:100%;box-sizing:border-box;margin-bottom:4px;padding:3px\">' +
+      '<select id=\"vsel\" size=\"12\" style=\"width:100%;font-size:12px\"></select>';
+    L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
+    return d;
+  };
+  sel.addTo(map);
+  var selEl = el.querySelector('#vsel'), filtEl = el.querySelector('#vfilter');
+
+  function buildOptions(q) {
+    q = (q || '').toLowerCase();
+    var cur = selEl.value, groups = {}, order = [];
+    vars.forEach(function(v, i) {
+      if (q && v.label.toLowerCase().indexOf(q) < 0 && v.group.toLowerCase().indexOf(q) < 0) return;
+      if (!groups[v.group]) { groups[v.group] = []; order.push(v.group); }
+      groups[v.group].push(i);
+    });
+    selEl.innerHTML = '';
+    order.forEach(function(g) {
+      var og = document.createElement('optgroup'); og.label = g;
+      groups[g].forEach(function(i) {
+        var o = document.createElement('option'); o.value = i; o.text = vars[i].label; og.appendChild(o);
+      });
+      selEl.appendChild(og);
+    });
+    if (cur !== '') selEl.value = cur;
+  }
+
+  function render(idx) {
+    var v = vars[idx], br = breaks(v.values);
+    var ranked = v.values.map(function(val, j) { return {j: j, val: val}; })
+                  .filter(function(r) { return ok(r.val); })
+                  .sort(function(a, b) { return b.val - a.val; });
+    var rank = {}; ranked.forEach(function(r, k) { rank[r.j] = k + 1; });
+    ous.forEach(function(id, j) {
+      var l = lyr(id); if (!l) return;
+      var val = v.values[j];
+      l.setStyle({fillColor: colour(val, br), fillOpacity: 0.85, weight: 1, color: 'white'});
+      var tip = '<b>' + names[j] + '</b><br>' + v.label + ': <b>' + fmt(val, v.rate) + '</b>';
+      if (l.getTooltip()) l.setTooltipContent(tip); else l.bindTooltip(tip, {sticky: true});
+      var pop = '<div style=\"font:12px Segoe UI,Arial;max-width:300px\">' +
+        '<div style=\"font-size:14px;font-weight:700;color:' + data.navy + '\">' + names[j] + '</div>' +
+        '<div style=\"margin:4px 0\">' + v.label + ':<br><b style=\"font-size:14px\">' + fmt(val, v.rate) +
+        '</b>' + (rank[j] ? '  (rank ' + rank[j] + ' of ' + ranked.length + ')' : '') + '</div><table>';
+      for (var q = 0; q < data.key_n; q++) {
+        pop += '<tr><td style=\"padding-right:8px;color:#555\">' + vars[q].label + '</td><td style=\"text-align:right\"><b>' +
+          fmt(vars[q].values[j], vars[q].rate) + '</b></td></tr>';
+      }
+      pop += '</table></div>';
+      if (l.getPopup()) l.setPopupContent(pop); else l.bindPopup(pop);
+    });
+    var h = '<div style=\"font-weight:700;color:' + data.navy + ';margin-bottom:2px\">' + v.label + '</div>' +
+      '<div style=\"color:#555;margin-bottom:6px\">Kenya: <b>' + fmt(v.national, v.rate) + '</b> · by ' + data.area + '</div>';
+    for (var i = 1; i < br.length; i++) {
+      var c = colour(br[i], br);
+      h += '<div><i style=\"display:inline-block;width:14px;height:12px;margin-right:6px;background:' + c +
+           '\"></i>' + fmt(br[i - 1], v.rate) + ' – ' + fmt(br[i], v.rate) + '</div>';
+    }
+    if (br.length === 1) h += '<div><i style=\"display:inline-block;width:14px;height:12px;margin-right:6px;background:' +
+      ramp[ramp.length - 1] + '\"></i>' + fmt(br[0], v.rate) + '</div>';
+    h += '<div><i style=\"display:inline-block;width:14px;height:12px;margin-right:6px;background:' + NA_COL +
+         '\"></i>No data</div>';
+    legend._div.innerHTML = h;
+  }
+
+  buildOptions('');
+  selEl.value = 0; render(0);
+  selEl.addEventListener('change', function() { if (selEl.value !== '') render(+selEl.value); });
+  filtEl.addEventListener('input', function() { buildOptions(filtEl.value); });
+}"
 
 m <- leaflet(map_df, options = leafletOptions(zoomSnap = 0.25, zoomDelta = 0.5)) |>
   addProviderTiles(providers$CartoDB.Positron, group = "Light") |>
-  addProviderTiles(providers$OpenStreetMap,    group = "Street")
-
-layers <- filter(show, layer)
-for (i in seq_len(nrow(layers))) {
-  k   <- layers$key[i]
-  lab <- layers$label[i]
-  v   <- map_df[[k]]
-  pal <- make_pal(v)
-  if (is.null(pal)) {
-    warning("No county data returned for '", lab, "' — layer skipped. Check its UID/period.")
-    next
-  }
-  m <- m |>
-    addPolygons(
-      fillColor = pal(v), fillOpacity = 0.8, color = "white", weight = 1,
-      group = lab, popup = popup_html,
-      label = lapply(sprintf("<b>%s</b><br>%s: %s", map_df$ou_name, lab, fmt_k(v, k)), HTML),
-      labelOptions = labelOptions(textsize = "12px", direction = "auto"),
-      highlightOptions = highlightOptions(weight = 3, color = navy, fillOpacity = 0.95,
-                                          bringToFront = TRUE)) |>
-    addLegend(pal = pal, values = v, title = paste0(lab, "<br><small>by ", area_lab, "</small>"),
-              position = "bottomright", opacity = 0.9,
-              className = paste0("info legend leg-", k),
-              labFormat = if (grepl("_rate$", k)) labelFormat(suffix = "%", digits = 0)
-                          else labelFormat(big.mark = ",", digits = 0))
-}
-
-m <- m |>
-  addLayersControl(baseGroups = layers$label, overlayGroups = c("Light", "Street"),
-                   options = layersControlOptions(collapsed = FALSE)) |>
+  addProviderTiles(providers$OpenStreetMap,    group = "Street") |>
+  addPolygons(layerId = ~ou_uid, fillColor = "#D9D9D9", fillOpacity = 0.85,
+              color = "white", weight = 1) |>
+  addLayersControl(overlayGroups = c("Light", "Street"),
+                   position = "bottomleft",
+                   options = layersControlOptions(collapsed = TRUE)) |>
   hideGroup("Street") |>
   addControl(HTML(title_html), position = "topleft") |>
   addScaleBar(position = "bottomleft") |>
   addEasyButton(easyButton(icon = "fa-globe", title = "Reset view",
                            onClick = JS("function(btn, map){ map.setView([0.2, 37.9], 6); }"))) |>
   setView(lng = 37.9, lat = 0.2, zoom = 6) |>
-  onRender("
-    function(el, x, data) {
-      var map = this;
-      function showLegend(name) {
-        el.querySelectorAll('.info.legend').forEach(function(l){ l.style.display = 'none'; });
-        var k = data[name];
-        if (k) el.querySelectorAll('.leg-' + k).forEach(function(l){ l.style.display = 'block'; });
-      }
-      showLegend(Object.keys(data)[0]);
-      map.on('baselayerchange', function(e){ showLegend(e.name); });
-    }", data = setNames(as.list(layers$key), layers$label))
+  onRender(map_js, data = js_data)
 
 print(m)   # view in RStudio Viewer
+
 
 tryCatch(
   saveWidget(m, out_html, selfcontained = TRUE, title = "Kenya HIV Map — KHIS"),
@@ -518,5 +667,33 @@ addWorksheet(wb, "Indicator UIDs")
 writeData(wb, 2, indicators |> mutate(periods = vapply(period_type, function(pt)
                                          paste(pe_for[[pt]], collapse = ";"), character(1))),
           headerStyle = hs)
+
+# All MOH 731 (2023) data elements by county
+if (nrow(des)) {
+  all731 <- map_df |> st_drop_geometry() |> select(ou_uid, ou_name) |>
+    left_join(de_wide, by = "ou_uid") |>
+    select(ou_name, any_of(des$id))
+  tot <- as_tibble(c(list(ou_name = "KENYA"),
+                     setNames(as.list(des$national), des$id)))[, names(all731)]
+  all731 <- bind_rows(all731, tot)
+  names(all731) <- c(area_lab, des$name[match(names(all731)[-1], des$id)])
+  addWorksheet(wb, "MOH 731 all elements")
+  writeData(wb, "MOH 731 all elements", all731, headerStyle = hs)
+  addStyle(wb, "MOH 731 all elements", createStyle(numFmt = "#,##0"),
+           rows = 2:(nrow(all731) + 1), cols = 2:ncol(all731), gridExpand = TRUE)
+  addStyle(wb, "MOH 731 all elements", createStyle(textDecoration = "bold", fgFill = "#DEEBF7", numFmt = "#,##0"),
+           rows = nrow(all731) + 1, cols = seq_along(all731), gridExpand = TRUE, stack = TRUE)
+  setColWidths(wb, "MOH 731 all elements", cols = 1, widths = 20)
+  setColWidths(wb, "MOH 731 all elements", cols = 2:ncol(all731), widths = 16)
+  setRowHeights(wb, "MOH 731 all elements", rows = 1, heights = 90)
+  freezePane(wb, "MOH 731 all elements", firstActiveRow = 2, firstActiveCol = 2)
+
+  addWorksheet(wb, "MOH 731 element list")
+  writeData(wb, "MOH 731 element list",
+            des |> transmute(Section = section, `Data element` = name, UID = id,
+                             Kenya = national, Period = report_period, Dataset = ds_name),
+            headerStyle = hs)
+  setColWidths(wb, "MOH 731 element list", cols = 1:6, widths = c(30, 60, 14, 14, 10, 40))
+}
 saveWorkbook(wb, out_xlsx, overwrite = TRUE)
 message("Table saved: ", normalizePath(out_xlsx))
