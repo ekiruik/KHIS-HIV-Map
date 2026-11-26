@@ -95,6 +95,14 @@ add_water <- TRUE
 logo_moh    <- "logos/moh_logo.png"      # Ministry of Health, Republic of Kenya
 logo_nascop <- "logos/nascop_logo.png"   # NASCOP
 
+# Surveillance dashboards (NASCOP) (shown as a bar at the bottom of the map; open in a new tab)
+related_links <- list(
+  list(label = "Kenya HIV Incidence Monitoring (Recency)",
+       url   = "https://recency-reports.nascop.org/PBIReports/powerbi/RECENCY/Kenya%20HIV%20Incidence%20Monitoring"),
+  list(label = "Viral Load dashboard", url = "https://viralload.nascop.org/"),
+  list(label = "EID dashboard",        url = "https://eid.nascop.org/")
+)
+
 out_dir  <- "outputs"
 dir.create(out_dir, showWarnings = FALSE)
 out_html <- file.path(out_dir, "KHIS_HIV_Map_Service_Reporting.html")
@@ -801,7 +809,7 @@ img_uri <- function(p) {
   paste0("data:image/png;base64,", jsonlite::base64_enc(readBin(p, "raw", file.info(p)$size)))
 }
 js_data <- list(
-  logo_l = img_uri(logo_moh), logo_r = img_uri(logo_nascop),
+  logo_l = img_uri(logo_moh), logo_r = img_uri(logo_nascop), links = related_links,
   ous = ou_order, names = shp$ou_name, area = area_lab, title = map_title,
   lat = unname(lab_pts[, "Y"]), lng = unname(lab_pts[, "X"]),
   navy = navy, ramp = navy_ramp, target = rate_target, n_months = n_months,
@@ -871,6 +879,14 @@ map_css <- "
   font:600 10px 'Segoe UI',Arial,sans-serif;color:#1b1b1b;pointer-events:none;
   text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 3px #fff}
 .kh-lab div span{display:block;font-weight:700;font-size:10px;color:#1F4E79}
+.kh-links{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);z-index:1000;
+  background:rgba(255,255,255,.97);border-radius:20px;box-shadow:0 2px 10px rgba(0,0,0,.18);
+  padding:6px 14px;font:12px 'Segoe UI',Arial,sans-serif;white-space:nowrap;max-width:60%;
+  overflow-x:auto}
+.kh-links b{color:#1F4E79;margin-right:6px}
+.kh-links a{color:#1F4E79;text-decoration:none;font-weight:600;padding:2px 8px;border-radius:12px;
+  border:1px solid #c9d3df;margin:0 2px;background:#f4f7fb;display:inline-block}
+.kh-links a:hover{background:#1F4E79;color:#fff}
 .kh-tabs{display:flex;gap:0;margin:-2px 0 8px;border:1px solid #c9d3df;border-radius:6px;overflow:hidden}
 .kh-tabs button{flex:1;border:0;background:#f4f7fb;padding:6px 4px;font:700 12px 'Segoe UI',Arial;
   color:#1F4E79;cursor:pointer}
@@ -1071,6 +1087,15 @@ function(el, x, D) {
 
   /* ---------- title banner ---------- */
   var tEl = L.DomUtil.create('div', 'kh-title', el);
+
+  /* ---------- surveillance dashboards (bottom bar) ---------- */
+  if (D.links && D.links.length) {
+    var lk = L.DomUtil.create('div', 'kh-links', el);
+    L.DomEvent.disableClickPropagation(lk); L.DomEvent.disableScrollPropagation(lk);
+    lk.innerHTML = '<b>Surveillance dashboards:</b>' + D.links.map(function(o) {
+      return '<a href=\"' + o.url + '\" target=\"_blank\" rel=\"noopener\">' + o.label + ' &#8599;</a>';
+    }).join('');
+  }
   function setTitle() {
     tEl.innerHTML = (D.logo_l ? '<img src=\"' + D.logo_l + '\" alt=\"Ministry of Health\">' : '') +
       '<div class=\"tx\"><div class=\"t1\">' + D.title + '</div>' +
@@ -1249,7 +1274,7 @@ function(el, x, D) {
 }"
 
 fit_js <- sprintf(paste0("function(btn, map){ map.fitBounds([[%f,%f],[%f,%f]], ",
-                          "{paddingTopLeft:[300,95], paddingBottomRight:[230,30]}); }"),
+                          "{paddingTopLeft:[300,95], paddingBottomRight:[230,60]}); }"),
                   kbb[["ymin"]], kbb[["xmin"]], kbb[["ymax"]], kbb[["xmax"]])
 north_html <- paste0("<div class='kh-card' style='padding:4px 8px;text-align:center;line-height:1'>",
                      "<div style='font-size:16px;color:", navy, "'>&#9650;</div>",
@@ -1290,7 +1315,7 @@ m <- m |>
   addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) |>
   addEasyButton(easyButton(icon = "fa-globe", title = "Reset view", onClick = JS(fit_js))) |>
   fitBounds(kbb[["xmin"]], kbb[["ymin"]], kbb[["xmax"]], kbb[["ymax"]],
-            options = list(paddingTopLeft = c(300, 95), paddingBottomRight = c(230, 30))) |>
+            options = list(paddingTopLeft = c(300, 95), paddingBottomRight = c(230, 60))) |>
   setMaxBounds(kbb[["xmin"]] - 12, kbb[["ymin"]] - 10, kbb[["xmax"]] + 12, kbb[["ymax"]] + 10) |>
   htmlwidgets::prependContent(tags$style(HTML(map_css))) |>
   onRender(map_js, data = js_data)
