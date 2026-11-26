@@ -1,5 +1,5 @@
 # =============================================================================
-#  KENYA HIV SERVICE REPORTING — INTERACTIVE MAP (KHIS / DHIS2)
+#  COUNTY-LEVEL HIV SERVICE PROVISION IN KENYA: INTERACTIVE MAP (KHIS / DHIS2)
 #  Reporting performance of the 7 HIV service forms (Rev 2023), by county:
 #    HIV Testing Services & PrEP | EMTCT | HIV & TB Treatment |
 #    Medical Male Circumcision   | Post-Exposure Prophylaxis |
@@ -7,6 +7,10 @@
 #  Indicators : Reporting rate, Reporting rate on time, Actual reports,
 #               Actual reports on time, Expected reports
 #  Filters    : Service | Indicator | Reporting month (or last 12 months combined)
+#  Service delivery tab (date-range filter):
+#     HTS tests & positives, HIV self-test kits (MOH 643B), PrEP new / STI / seroconversion,
+#     ART newly started, Currently on ART (cumulative), EMTCT testing / positives / HAART / HBV
+#     Monthly counts are summed over the range; Currently on ART shows the end-month value.
 #  Output     : Self-contained interactive HTML map + Excel workbook
 #  NASCOP — Strategic Information
 # =============================================================================
@@ -118,6 +122,75 @@ metrics <- tribble(
   "expected",   "Expected reports",        "count"
 )
 
+# ---- SERVICE DELIVERY (MOH 731 Rev 2023 + MOH 643B) ---------------------------
+# Catalogue of KHIS data elements -> clean variables. Monthly counts are SUMMED over
+# the selected date range; "Currently on ART" is CUMULATIVE (stock) and shows the value
+# at the END month of the range. `match` = regex used to find the element by name in KHIS;
+# fill `uid` in del_uid_override (named by code/key) to force a specific element.
+add_delivery <- TRUE
+fy_start_month <- 7                       # Kenya financial year starts in July
+age_lab <- c("<1" = "<1 yr", "1-4" = "1–4 yrs", "2-9" = "2–9 yrs", "5-9" = "5–9 yrs",
+             "10-14" = "10–14 yrs", "15-19" = "15–19 yrs", "20-24" = "20–24 yrs", "25+" = "25+ yrs")
+child_ages <- c("<1", "1-4", "2-9", "5-9", "10-14")
+art_ages   <- c("<1", "1-4", "5-9", "10-14", "15-19", "20-24", "25+")
+sex_lab    <- c(M = "Male", F = "Female")
+agesex <- function(prefix, nums, ages) tibble(code = sprintf("%s%02d", prefix, nums),
+                                              age = rep(ages, each = 2), sex = rep(c("M", "F"), length(ages)))
+prep_pop <- tribble(
+  ~off, ~grp,                              ~sex,
+  0,    "General population",              "M",
+  1,    "General population",              "F",
+  2,    "MSM/MSW",                         "M",
+  3,    "FSW",                             "F",
+  4,    "PWID/PWUD",                       "M",
+  5,    "PWID/PWUD",                       "F",
+  6,    "Discordant couples",              "M",
+  7,    "Discordant couples",              "F",
+  8,    "Vulnerable populations",          "M",
+  9,    "Vulnerable populations",          "F",
+  10,   "AYP (15–24 yrs)",                 "M",
+  11,   "AYP (15–24 yrs)",                 "F",
+  12,   "Pregnant & breastfeeding women",  "F")
+prep_rows <- function(area, short, start) prep_pop |>
+  mutate(code = sprintf("HV01-%02d", start + off), area = area, short = short) |> select(-off)
+spoint <- c("ANC", "L&D", "PNC ≤6 wks", "PNC >6 wks")
+
+del_cat <- bind_rows(
+  tibble(area = "HIV testing (HTS)", short = "HTS tests (facility)", code = "HV01-03"),
+  agesex("HV01-", 6:15, c("2-9", "10-14", "15-19", "20-24", "25+")) |>
+    mutate(area = "HIV positive (HTS)", short = "HTS positive"),
+  tibble(area = "HIV self-test kits used", short = "Self-test kits", code = c("643B-ORAL", "643B-BLOOD"),
+         grp = c("Oral", "Blood-based"),
+         match = c("643B.*self.?test.*oral", "643B.*self.?test.*blood")),
+  prep_rows("PrEP: new initiations", "PrEP new", 19),
+  prep_rows("PrEP: diagnosed with STI", "PrEP STI", 32),
+  tibble(area = "PrEP: seroconverted (HIV+)", short = "PrEP seroconverted",
+         code = c("HV01-45", "HV01-46"), sex = c("M", "F")),
+  agesex("HV03-", 1:14, art_ages)  |> mutate(area = "ART: newly started", short = "Started ART"),
+  agesex("HV03-", 15:28, art_ages) |> mutate(area = "ART: currently on ART (cumulative)",
+                                             short = "On ART", stock = TRUE),
+  tibble(area = "EMTCT: tested (initial)", short = "EMTCT tested",
+         code = c("HV02-02", "HV02-04", "HV02-06", "HV02-08"), grp = spoint),
+  tibble(area = "EMTCT: HIV positive", short = "EMTCT positive",
+         code = sprintf("HV02-%02d", 10:13), grp = spoint),
+  tibble(area = "EMTCT: started HAART", short = "EMTCT started HAART",
+         code = sprintf("HV02-%02d", 15:18), grp = spoint),
+  tibble(area = "EMTCT: HBV screened positive", short = "HBV screened positive", code = "HV02-20")
+) |>
+  mutate(stock = coalesce(stock, FALSE),
+         match = coalesce(match, paste0(code, "(?![0-9])")))
+for (cc in c("grp", "age", "sex")) if (!cc %in% names(del_cat)) del_cat[[cc]] <- NA_character_
+# single-sex groups (MSM, FSW, PBFW) don't repeat the sex in their name
+del_cat <- del_cat |>
+  group_by(area, grp) |> mutate(n_sex = n_distinct(na.omit(sex))) |> ungroup() |>
+  mutate(detail = pmap_chr(list(grp, age, sex, n_sex), function(g, a, x, ns) {
+           parts <- c(if (!is.na(g)) g, if (!is.na(a)) age_lab[[a]],
+                      if (!is.na(x) && (is.na(g) || ns > 1)) sex_lab[[x]])
+           if (length(parts)) paste(parts, collapse = ", ") else "Total" }),
+         variable = ifelse(detail == "Total", short, paste0(short, ": ", detail))) |>
+  select(-n_sex)
+del_uid_override <- character(0)   # e.g. c("HV01-03" = "abcdEFGhij1")
+
 navy      <- "#1F4E79"
 navy_ramp <- c("#DEEBF7", "#9ECAE1", "#4292C6", "#2171B5", "#1F4E79")
 
@@ -192,7 +265,7 @@ dhis_get <- function(path, query = list(), simplify = TRUE) {
 lg <- khis_login()
 cat("\nLogin attempts (HTTP status):\n"); print(lg$res)
 if (is.null(lg$mode) && interactive()) {          # wrong password -> pop-up again
-  cat("\nLogin rejected — please re-enter your KHIS username/password.\n")
+  cat("\nLogin rejected: please re-enter your KHIS username/password.\n")
   khis_pat <- ""; cr <- ask_creds(khis_user); khis_user <- cr$user; khis_pass <- cr$pass
   lg <- khis_login(); print(lg$res)
 }
@@ -290,7 +363,7 @@ if (add_water) {
            error = function(e2) NULL))
       if (!is.null(x)) return(x)
     }
-    warning("Could not load Natural Earth '", type, "' — map drawn without it."); NULL
+    warning("Could not load Natural Earth '", type, "': map drawn without it."); NULL
   }
   water_box <- st_as_sfc(st_bbox(c(xmin = kbb[["xmin"]] - 6, ymin = kbb[["ymin"]] - 6,
                                    xmax = kbb[["xmax"]] + 6, ymax = kbb[["ymax"]] + 6),
@@ -348,6 +421,7 @@ raw <- map_dfr(seq_len(nrow(services)), function(i) {
 if (!nrow(raw)) stop("KHIS returned no reporting data for ", mlab(tail(months, 1)), " – ", mlab(months[1]))
 
 sum_na <- function(x) if (all(is.na(x))) NA_real_ else sum(x, na.rm = TRUE)
+nv     <- function(v) unname(as.numeric(v))          # NA -> null in the browser
 pct    <- function(a, b) ifelse(!is.na(b) & b > 0, 100 * a / b, NA_real_)
 add_rates <- function(d) d |>
   mutate(actual    = ifelse(!is.na(expected) & is.na(actual),    0, actual),
@@ -377,18 +451,108 @@ national <- county |>
   summarise(across(c(actual, actual_ot, expected), sum_na), .groups = "drop") |>
   add_rates()
 
-cat("\nNATIONAL REPORTING RATE —", mlab(months[1]), "\n")
+cat("\nNATIONAL REPORTING RATE:", mlab(months[1]), "\n")
 print(national |> filter(pe == months[1]) |>
         left_join(select(services, svc = key, service), by = "svc") |>
         transmute(Service = service, Expected = expected, Actual = actual,
                   `Rate %` = round(rate, 1), `On time %` = round(rate_ot, 1)) |>
         as.data.frame())
 
+# ---- 5b. SERVICE DELIVERY DATA (monthly, county) ------------------------------
+del_js <- NULL; del_long <- NULL
+if (add_delivery) {
+  srch <- function(term) {
+    q <- list(filter = paste0("name:ilike:", term), fields = "id,name", paging = "false")
+    x <- dhis_get("dataElements", q)$dataElements
+    if (NROW(x)) as_tibble(x) else tibble(id = character(), name = character())
+  }
+  cand <- distinct(bind_rows(srch("MOH 731"), srch("643B")), id, .keep_all = TRUE)
+  del_cat$uid <- NA_character_; del_cat$khis_name <- NA_character_
+  for (i in seq_len(nrow(del_cat))) {
+    ov <- unname(del_uid_override[del_cat$code[i]])
+    if (length(ov) == 1 && !is.na(ov) && nzchar(ov)) { del_cat$uid[i] <- ov; next }
+    hit <- cand |>
+      filter(str_detect(name, regex(del_cat$match[i], ignore_case = TRUE))) |>
+      arrange(desc(str_detect(name, "^MOH 731_|Rev 2023")), nchar(name))
+    if (nrow(hit)) { del_cat$uid[i] <- hit$id[1]; del_cat$khis_name[i] <- hit$name[1] }
+  }
+  cat("\n", strrep("=", 90), "\n  SERVICE DELIVERY: clean variable  <-  KHIS data element\n",
+      strrep("=", 90), "\n", sep = "")
+  cat(sprintf("  %-10s %-52s <- %s\n", del_cat$code, del_cat$variable,
+              ifelse(is.na(del_cat$uid), "NOT FOUND", del_cat$khis_name)), sep = "")
+  cat("  To force an element: del_uid_override <- c(\"HV01-03\" = \"<uid>\")\n", strrep("=", 90), "\n", sep = "")
+  if (any(is.na(del_cat$uid))) warning("Not found in KHIS and left out: ",
+                                       paste(del_cat$variable[is.na(del_cat$uid)], collapse = "; "))
+  del_cat <- filter(del_cat, !is.na(uid))
+  if (!nrow(del_cat)) { warning("No service-delivery data elements found."); add_delivery <- FALSE }
+}
+if (add_delivery) {
+  message("Pulling service delivery data (", nrow(del_cat), " data elements) ...")
+  chunks <- split(unique(del_cat$uid), ceiling(seq_along(unique(del_cat$uid)) / 20))
+  del_raw <- map_dfr(chunks, function(ids) {
+    res <- tryCatch(dhis_get("analytics.json", list(
+      dimension = c(paste0("dx:", paste(ids, collapse = ";")),
+                    paste0("pe:", paste(months, collapse = ";")), ou_dim),
+      skipMeta = "true")), error = function(e) { warning(conditionMessage(e)); NULL })
+    if (is.null(res) || !length(res$rows)) return(NULL)
+    df <- as.data.frame(res$rows, stringsAsFactors = FALSE); names(df) <- res$headers$name
+    tibble(uid = df$dx, pe = df$pe, ou_uid = df$ou, value = as.numeric(df$value))
+  })
+  if (!nrow(del_raw)) del_raw <- tibble(uid = character(), pe = character(), ou_uid = character(), value = numeric())
+  del_cat <- mutate(del_cat, ix = row_number() - 1L)            # 0-based index for the browser
+
+  del_long <- del_cat |>
+    select(ix, uid, code, area, variable, stock) |>
+    left_join(del_raw, by = "uid", relationship = "many-to-many") |>
+    filter(is.na(ou_uid) | ou_uid %in% ou_order) |>
+    group_by(ix, code, area, variable, stock, ou_uid, pe) |>
+    summarise(value = sum_na(value), .groups = "drop") |>
+    filter(!is.na(pe)) |>
+    complete(nesting(ix, code, area, variable, stock), ou_uid = ou_order, pe = months)
+
+  del_v   <- lapply(del_cat$ix, function(i) {
+    d <- del_long[del_long$ix == i, ]
+    lapply(months, function(p) { dd <- d[d$pe == p, ]; nv(dd$value[match(ou_order, dd$ou_uid)]) })
+  })
+  del_nat <- lapply(del_cat$ix, function(i) {
+    d <- del_long[del_long$ix == i, ]
+    nv(vapply(months, function(p) sum_na(d$value[d$pe == p]), numeric(1)))
+  })
+
+  mk_views <- function(it) {
+    V <- list(list(label = "Total", kind = "agg", idx = I(it$ix)))
+    add <- function(lbl, rows, kind = "agg")
+      if (length(rows)) V[[length(V) + 1]] <<- list(label = lbl, kind = kind, idx = I(it$ix[rows]))
+    sx <- unique(na.omit(it$sex)); ag <- unique(na.omit(it$age)); gp <- unique(na.omit(it$grp))
+    if (length(sx) > 1) { add("Male", which(it$sex == "M")); add("Female", which(it$sex == "F")) }
+    if (length(ag) > 1) {
+      ch <- which(it$age %in% child_ages); ad <- which(!is.na(it$age) & !it$age %in% child_ages)
+      if (length(ch) && length(ad)) { add("Children (<15 yrs)", ch); add("15+ yrs", ad) }
+      for (a in ag) add(paste0(age_lab[[a]], " (both sexes)"), which(it$age == a))
+    }
+    if (length(gp) > 1) for (g in gp) add(g, which(it$grp == g))
+    if (length(sx) > 1 && (length(ag) > 1 || length(gp) > 1))
+      for (r in seq_len(nrow(it)))
+        if (is.na(it$grp[r]) || sum(it$grp == it$grp[r], na.rm = TRUE) > 1)
+          add(it$detail[r], r, kind = "item")
+    V
+  }
+  areas <- unique(del_cat$area)
+  del_js <- list(
+    areas = lapply(areas, function(a) {
+      it <- del_cat[del_cat$area == a, ]
+      list(label = a, stock = isTRUE(any(it$stock)), views = mk_views(it))
+    }),
+    v = del_v, nat = del_nat)
+  em <- as.integer(format(end_date, "%m"))
+  fy_n <- min(n_months, ((em - fy_start_month) %% 12) + 1)
+  cat("\nService delivery loaded:", length(areas), "programme areas,", nrow(del_cat), "variables.\n")
+}
+
 # ---- 6. INTERACTIVE MAP ------------------------------------------------------
 periods  <- c(months, "ALL")
 p_labels <- c(mlab(months), all_lab)
 area_lab <- ifelse(map_level == 2, "County", "Sub-county")
-nv       <- function(v) unname(as.numeric(v))
 
 js_v <- setNames(lapply(services$key, function(s) {
   setNames(lapply(metrics$key, function(m) {
@@ -407,7 +571,7 @@ js_nat <- setNames(lapply(services$key, function(s) {
 }), services$key)
 
 img_uri <- function(p) {
-  if (!file.exists(p)) { warning("Logo not found: ", p, " — banner shown without it."); return("") }
+  if (!file.exists(p)) { warning("Logo not found: ", p, ": banner shown without it."); return("") }
   paste0("data:image/png;base64,", jsonlite::base64_enc(readBin(p, "raw", file.info(p)$size)))
 }
 js_data <- list(
@@ -422,7 +586,8 @@ js_data <- list(
   periods  = lapply(seq_along(periods), function(i)
     list(pe = periods[i], label = p_labels[i],
          short = if (periods[i] == "ALL") "All" else format(as.Date(paste0(periods[i], "01"), "%Y%m%d"), "%b"))),
-  v = js_v, nat = js_nat)
+  v = js_v, nat = js_nat, del = del_js,
+  fy_n = if (exists("fy_n")) fy_n else n_months)
 
 # Header card: latest-month national reporting rate per service
 rag <- function(x) ifelse(is.na(x), "#BDBDBD", ifelse(x >= 95, "#1a9850", ifelse(x >= 90, "#91cf60",
@@ -441,7 +606,7 @@ header_rows <- paste0(
   "</td></tr>", collapse = "")
 
 title_html <- paste0(
-  "<div class='kh-card' style='max-width:340px'>",
+  "<div class='kh-card' id='kh-sum' style='max-width:340px'>",
   "<div class='kh-h'>Kenya reporting rate</div>",
   "<div class='kh-sub' style='margin-bottom:6px'>All services · ", mlab(months[1]),
   " · rate (actual/expected reports)</div>",
@@ -480,38 +645,94 @@ map_css <- "
   font:600 10px 'Segoe UI',Arial,sans-serif;color:#1b1b1b;pointer-events:none;
   text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 3px #fff}
 .kh-lab div span{display:block;font-weight:700;font-size:10px;color:#1F4E79}
+.kh-tabs{display:flex;gap:0;margin:-2px 0 8px;border:1px solid #c9d3df;border-radius:6px;overflow:hidden}
+.kh-tabs button{flex:1;border:0;background:#f4f7fb;padding:6px 4px;font:700 12px 'Segoe UI',Arial;
+  color:#1F4E79;cursor:pointer}
+.kh-tabs button.on{background:#1F4E79;color:#fff}
+.kh-art{border-collapse:collapse;font-size:12px}
+.kh-art th{font-size:10px;text-transform:uppercase;color:#666;text-align:right;padding:1px 4px}
+.kh-art th:first-child{text-align:left}
+.kh-art td{padding:1px 4px;text-align:right}
+.kh-art td:first-child{text-align:left;white-space:nowrap}
+.kh-art tr.sel td{background:#eef3f9}
+.kh-quick{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.kh-quick button{border:1px solid #c9d3df;background:#f4f7fb;border-radius:12px;padding:3px 8px;
+  font:600 11px 'Segoe UI',Arial;color:#1F4E79;cursor:pointer}
+.kh-quick button:hover{background:#1F4E79;color:#fff}
+.kh-note{font-size:11px;color:#666;margin-top:6px;line-height:1.3}
+.kh-card select:disabled{background:#f0f0f0;color:#999}
 .kh-chk{display:flex;align-items:center;gap:6px;margin-top:9px;font-size:12px;color:#333;cursor:pointer}
 "
 
 map_js <- "
 function(el, x, D) {
-  var map = this, ous = D.ous, names = D.names, NA_COL = '#D9D9D9';
+  var map = this, ous = D.ous, names = D.names, NA_COL = '#D9D9D9', NM = D.n_months;
   if (map.attributionControl) map.attributionControl.setPrefix('Source: KHIS (DHIS2) · NASCOP');
   var RB = [0, 50, 80, 90, 95], RC = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'];
   var RL = ['< 50%', '50 – 79%', '80 – 89%', '90 – 94%', '95% +'];
-  var st = {s: 0, m: 0, p: 0}, ALL = D.periods.length - 1;
+  var HAS_DEL = !!(D.del && D.del.areas && D.del.areas.length);
+  var st = {mode: 'rep', s: 0, m: 0, p: 0, ar: 0, vw: 0, f: 0, t: 0}, ALL = D.periods.length - 1;
+
+  /* ---------- helpers ---------- */
   function lyr(id) { return map.layerManager.getLayer('shape', id); }
   function ok(v) { return v !== null && v !== undefined && !isNaN(v); }
-  function M() { return D.metrics[st.m]; }
-  function S() { return D.services[st.s]; }
-  function isRate(m) { return (m || M()).type === 'rate'; }
-  function fmt(v, m) {
-    if (!ok(v)) return '–';
-    return isRate(m) ? v.toFixed(1) + '%' : Math.round(v).toLocaleString('en-US');
-  }
-  function vals(s, m, p) { return D.v[D.services[s].key][D.metrics[m].key][p]; }
+  function isDel() { return st.mode === 'del'; }
+  function isRate() { return !isDel() && D.metrics[st.m].type === 'rate'; }
+  function n0(v) { return ok(v) ? Math.round(v).toLocaleString('en-US') : '–'; }
+  function fmtR(v, rate) { return !ok(v) ? '–' : (rate ? v.toFixed(1) + '%' : n0(v)); }
+  function fmt(v) { return fmtR(v, isRate()); }
+  function data_area() { return D.area === 'County' ? 'counties' : 'sub-counties'; }
+  function arr(v) { return Array.isArray(v) ? v : [v]; }
+
+  /* reporting */
+  function repVals(s, m, p) { return D.v[D.services[s].key][D.metrics[m].key][p]; }
+  function repNat(s, m, p)  { var a = D.nat[D.services[s].key][D.metrics[m].key]; return a ? a[p] : null; }
   function mi(key) { for (var i = 0; i < D.metrics.length; i++) if (D.metrics[i].key === key) return i; return -1; }
   var I_ACT = mi('actual'), I_AOT = mi('actual_ot'), I_EXP = mi('expected');
-  function n0(v) { return ok(v) ? Math.round(v).toLocaleString('en-US') : '–'; }
-  /* 'actual/expected' text for a rate metric; '' for count metrics */
-  function frac(m, a_on, a, e) {
-    var mm = D.metrics[m];
+  function frac(mIdx, a_on, a, e) {
+    var mm = D.metrics[mIdx];
     if (mm.type !== 'rate' || !ok(e)) return '';
     return n0(mm.key === 'rate_ot' ? a_on : a) + '/' + n0(e);
   }
-  function fracC(s, m, p, j) { return frac(m, vals(s, I_AOT, p)[j], vals(s, I_ACT, p)[j], vals(s, I_EXP, p)[j]); }
-  function fracN(s, m, p)    { return frac(m, natv(s, I_AOT, p), natv(s, I_ACT, p), natv(s, I_EXP, p)); }
-  function natv(s, m, p) { var a = D.nat[D.services[s].key][D.metrics[m].key]; return a ? a[p] : null; }
+  function fracC(mIdx, j) {
+    if (isDel()) return '';
+    return frac(mIdx, repVals(st.s, I_AOT, st.p)[j], repVals(st.s, I_ACT, st.p)[j], repVals(st.s, I_EXP, st.p)[j]);
+  }
+  function fracN() {
+    if (isDel()) return '';
+    return frac(st.m, repNat(st.s, I_AOT, st.p), repNat(st.s, I_ACT, st.p), repNat(st.s, I_EXP, st.p));
+  }
+
+  /* service delivery: sum items over months in range (stock = value at end month) */
+  function A() { return D.del.areas[st.ar]; }
+  function V() { return A().views[st.vw]; }
+  function months(area) { var a = []; if (area.stock) a.push(st.t); else for (var p = st.t; p <= st.f; p++) a.push(p); return a; }
+  function addv(s, v) { return ok(v) ? (ok(s) ? s + v : v) : s; }
+  function viewCounty(view, area, j, ps) {
+    var s = null; ps = ps || months(area);
+    arr(view.idx).forEach(function(i) { ps.forEach(function(p) { s = addv(s, D.del.v[i][p][j]); }); });
+    return s;
+  }
+  function viewNat(view, area, ps) {
+    var s = null; ps = ps || months(area);
+    arr(view.idx).forEach(function(i) { ps.forEach(function(p) { s = addv(s, D.del.nat[i][p]); }); });
+    return s;
+  }
+  function curVals() {
+    if (!isDel()) return repVals(st.s, st.m, st.p);
+    var a = A(), v = V(), ps = months(a);
+    return ous.map(function(id, j) { return viewCounty(v, a, j, ps); });
+  }
+  function curNat() { return isDel() ? viewNat(V(), A()) : repNat(st.s, st.m, st.p); }
+  function rangeLab() {
+    if (A().stock) return 'As at ' + D.periods[st.t].label;
+    if (st.f === st.t) return D.periods[st.t].label;
+    return D.periods[st.f].label + ' – ' + D.periods[st.t].label + ' (' + (st.f - st.t + 1) + ' months)';
+  }
+  function plab() { return isDel() ? rangeLab() : D.periods[st.p].label; }
+  function selLabel() { return isDel() ? A().label : D.metrics[st.m].label; }
+  function selSub() { return isDel() ? V().label : D.services[st.s].label; }
+
   function qbreaks(vs) {
     var v = vs.filter(ok).sort(function(a, b) { return a - b; });
     if (!v.length) return [];
@@ -522,44 +743,43 @@ function(el, x, D) {
     }
     return br.filter(function(b, i, a) { return i === 0 || b > a[i - 1]; });
   }
+  function colourRate(v) { var c = RC[0]; for (var i = 0; i < RB.length; i++) if (v >= RB[i]) c = RC[i]; return c; }
   function colour(v, br) {
     if (!ok(v)) return NA_COL;
-    if (isRate()) { var c = RC[0]; for (var i = 0; i < RB.length; i++) if (v >= RB[i]) c = RC[i]; return c; }
+    if (isRate()) return colourRate(v);
     if (br.length < 2) return D.ramp[D.ramp.length - 1];
     var nb = br.length - 1;
     for (var k = 1; k < br.length; k++)
       if (v <= br[k] || k === nb) return D.ramp[Math.round((k - 1) * (D.ramp.length - 1) / Math.max(1, nb - 1))];
   }
 
-  /* ---------- trend chart (SVG) ---------- */
-  function trend(series, selIdx, rate, w, h, clickable) {
+  /* ---------- trend chart (SVG); bar i = month index NM-1-i ---------- */
+  function inSel(p) {
+    if (!isDel()) return p === st.p;
+    return A().stock ? p === st.t : (p >= st.t && p <= st.f);
+  }
+  function trend(series, rate, w, h, clickable) {
     var n = series.length, mx = 0;
     series.forEach(function(v) { if (ok(v) && v > mx) mx = v; });
     if (rate) mx = Math.max(100, mx); if (!mx) mx = 1;
     var bw = w / n, s = '<svg width=\"' + w + '\" height=\"' + (h + 14) + '\" style=\"display:block\">';
     for (var i = 0; i < n; i++) {
-      var v = series[i], bh = ok(v) ? Math.max(1, h * v / mx) : 0;
-      var col = (i === selIdx) ? D.navy : (rate && ok(v) ? colourRate(v) : '#9ECAE1');
-      s += '<rect ' + (clickable ? 'class=\"kh-bar\" data-i=\"' + i + '\" style=\"cursor:pointer\" ' : '') +
+      var p = NM - 1 - i, v = series[i], bh = ok(v) ? Math.max(1, h * v / mx) : 0, sel = inSel(p);
+      var col = sel ? D.navy : (rate && ok(v) ? colourRate(v) : '#9ECAE1');
+      s += '<rect ' + (clickable ? 'class=\"kh-bar\" data-p=\"' + p + '\" style=\"cursor:pointer\" ' : '') +
            'x=\"' + (i * bw + 1) + '\" y=\"' + (h - bh) + '\" width=\"' + Math.max(1, bw - 2) +
-           '\" height=\"' + bh + '\" rx=\"2\" fill=\"' + col + '\"' +
-           (i === selIdx ? ' stroke=\"#000\" stroke-width=\"1\"' : '') + '><title>' +
-           D.periods[D.n_months - 1 - i].label + ': ' + fmt(v, {type: rate ? 'rate' : 'count'}) + '</title></rect>';
+           '\" height=\"' + bh + '\" rx=\"2\" fill=\"' + col + '\"><title>' +
+           D.periods[p].label + ': ' + fmtR(v, rate) + '</title></rect>';
     }
     if (rate) {
       var ty = h - h * D.target / mx;
-      s += '<line x1=\"0\" x2=\"' + w + '\" y1=\"' + ty + '\" y2=\"' + ty +
-           '\" stroke=\"#333\" stroke-dasharray=\"3,2\" stroke-width=\"1\"/>';
+      s += '<line x1=\"0\" x2=\"' + w + '\" y1=\"' + ty + '\" y2=\"' + ty + '\" stroke=\"#333\" stroke-dasharray=\"3,2\" stroke-width=\"1\"/>';
     }
-    s += '<text x=\"0\" y=\"' + (h + 12) + '\" font-size=\"10\" fill=\"#777\">' + D.periods[D.n_months - 1].label + '</text>';
-    s += '<text x=\"' + w + '\" y=\"' + (h + 12) + '\" font-size=\"10\" fill=\"#777\" text-anchor=\"end\">' +
-         D.periods[0].label + '</text></svg>';
+    s += '<text x=\"0\" y=\"' + (h + 12) + '\" font-size=\"10\" fill=\"#777\">' + D.periods[NM - 1].label + '</text>';
+    s += '<text x=\"' + w + '\" y=\"' + (h + 12) + '\" font-size=\"10\" fill=\"#777\" text-anchor=\"end\">' + D.periods[0].label + '</text></svg>';
     return s;
   }
-  function colourRate(v) { var c = RC[0]; for (var i = 0; i < RB.length; i++) if (v >= RB[i]) c = RC[i]; return c; }
-  function monthSeries(getter) {             /* oldest -> latest */
-    var a = []; for (var p = D.n_months - 1; p >= 0; p--) a.push(getter(p)); return a;
-  }
+  function monthSeries(getter) { var a = []; for (var p = NM - 1; p >= 0; p--) a.push(getter(p)); return a; }
 
   /* ---------- hover highlight ---------- */
   ous.forEach(function(id) {
@@ -569,44 +789,72 @@ function(el, x, D) {
   });
 
   /* ---------- controls ---------- */
-  function ctl(pos, cls, w) {
+  function ctl(pos, w) {
     var c = L.control({position: pos});
     c.onAdd = function() {
-      var d = L.DomUtil.create('div', 'kh-card ' + (cls || ''));
+      var d = L.DomUtil.create('div', 'kh-card');
       if (w) d.style.width = w + 'px';
       L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
       return d;
     };
     c.addTo(map); return c.getContainer();
   }
-  var fBox = ctl('topright', '', 270), lBox = ctl('bottomright', '', 210), tBox = ctl('bottomleft', '', 290);
+  var fBox = ctl('topright', 290), lBox = ctl('bottomright', 225), tBox = ctl('bottomleft', 290);
+  var opt = function(a, lab) { return a.map(function(o, i) { return '<option value=\"' + i + '\">' + o[lab] + '</option>'; }).join(''); };
+  var mOpts = ''; for (var i0 = NM - 1; i0 >= 0; i0--) mOpts += '<option value=\"' + i0 + '\">' + D.periods[i0].label + '</option>';
 
-  var opt = function(arr, lab) { return arr.map(function(o, i) { return '<option value=\"' + i + '\">' + o[lab] + '</option>'; }).join(''); };
-  fBox.innerHTML = '<div class=\"kh-h\">Filters</div>' +
-    '<label>Service</label><select id=\"kh-s\">' + opt(D.services, 'label') + '</select>' +
+  fBox.innerHTML =
+    (HAS_DEL ? '<div class=\"kh-tabs\"><button data-mode=\"rep\" class=\"on\">Service reporting</button>' +
+               '<button data-mode=\"del\">Service delivery</button></div>' : '') +
+    '<div class=\"kh-h\" style=\"margin-top:2px\">Filters</div>' +
+    '<div id=\"kh-repf\"><label>Service</label><select id=\"kh-s\">' + opt(D.services, 'label') + '</select>' +
     '<label>Indicator</label><select id=\"kh-m\">' + opt(D.metrics, 'label') + '</select>' +
-    '<label>Reporting period</label><div class=\"kh-row\">' +
+    '<label>Period</label><div class=\"kh-row\">' +
     '<button class=\"kh-btn\" id=\"kh-prev\" title=\"Previous month\">&#9664;</button>' +
     '<select id=\"kh-p\" style=\"flex:1\">' + opt(D.periods, 'label') + '</select>' +
-    '<button class=\"kh-btn\" id=\"kh-next\" title=\"Next month\">&#9654;</button></div>' +
+    '<button class=\"kh-btn\" id=\"kh-next\" title=\"Next month\">&#9654;</button></div></div>' +
+    (HAS_DEL ? '<div id=\"kh-delf\" style=\"display:none\"><label>Programme area</label><select id=\"kh-ar\">' +
+      opt(D.del.areas, 'label') + '</select><label>Indicator / disaggregation</label><select id=\"kh-vw\"></select>' +
+      '<label>Date range</label><div class=\"kh-row\"><select id=\"kh-f\" style=\"flex:1\">' + mOpts + '</select>' +
+      '<span style=\"color:#666\">to</span><select id=\"kh-t\" style=\"flex:1\">' + mOpts + '</select></div>' +
+      '<div class=\"kh-quick\"><button data-q=\"1\">Last month</button><button data-q=\"3\">Last 3 mo</button>' +
+      '<button data-q=\"fy\">FY to date</button><button data-q=\"' + NM + '\">Last ' + NM + ' mo</button></div>' +
+      '<div class=\"kh-note\" id=\"kh-note\"></div></div>' : '') +
     '<label class=\"kh-chk\" style=\"text-transform:none;letter-spacing:0;font-weight:400\">' +
     '<input type=\"checkbox\" id=\"kh-lab\" checked> Show ' + (D.area === 'County' ? 'county' : 'sub-county') + ' names</label>';
-  var sS = fBox.querySelector('#kh-s'), sM = fBox.querySelector('#kh-m'), sP = fBox.querySelector('#kh-p');
-  var bPrev = fBox.querySelector('#kh-prev'), bNext = fBox.querySelector('#kh-next');
-  var cLab = fBox.querySelector('#kh-lab');
+  var q = function(s) { return fBox.querySelector(s); };
+  var sS = q('#kh-s'), sM = q('#kh-m'), sP = q('#kh-p'), bPrev = q('#kh-prev'), bNext = q('#kh-next'), cLab = q('#kh-lab');
+  var sAr = q('#kh-ar'), sVw = q('#kh-vw'), sF = q('#kh-f'), sT = q('#kh-t'), note = q('#kh-note');
+  function buildViews() { if (sVw) { sVw.innerHTML = opt(A().views, 'label'); if (st.vw >= A().views.length) st.vw = 0; } }
+
+  /* ---------- national summary card (top left) ---------- */
+  var sumEl = el.querySelector('#kh-sum'), sumRep = sumEl ? sumEl.innerHTML : '';
+  function setSummary() {
+    if (!sumEl) return;
+    if (!isDel()) { sumEl.innerHTML = sumRep; return; }
+    var a = A(), ps = months(a);
+    var h = '<div class=\"kh-h\">' + a.label + '</div><div class=\"kh-sub\" style=\"margin-bottom:6px\">Kenya · ' +
+            rangeLab() + (a.stock ? '' : ' · sum of months') + '</div><table class=\"kh-art\">';
+    a.views.forEach(function(v, k) {
+      if (v.kind === 'item') return;
+      h += '<tr' + (k === st.vw ? ' class=\"sel\"' : '') + (k === 0 ? ' style=\"font-weight:800\"' : '') +
+           '><td>' + v.label + '</td><td>' + n0(viewNat(v, a, ps)) + '</td></tr>';
+    });
+    sumEl.innerHTML = h + '</table>';
+  }
 
   /* ---------- title banner ---------- */
   var tEl = L.DomUtil.create('div', 'kh-title', el);
   function setTitle() {
     tEl.innerHTML = (D.logo_l ? '<img src=\"' + D.logo_l + '\" alt=\"Ministry of Health\">' : '') +
       '<div class=\"tx\"><div class=\"t1\">' + D.title + '</div>' +
-      '<div class=\"t2\">' + M().label + ' &nbsp;·&nbsp; ' + S().label + '</div>' +
-      '<div class=\"t3\">' + D.periods[st.p].label + ' &nbsp;·&nbsp; Source: KHIS (DHIS2)</div></div>' +
+      '<div class=\"t2\">' + selLabel() + ' &nbsp;·&nbsp; ' + selSub() + '</div>' +
+      '<div class=\"t3\">' + plab() + ' &nbsp;·&nbsp; Source: KHIS (DHIS2)</div></div>' +
       (D.logo_r ? '<img src=\"' + D.logo_r + '\" alt=\"NASCOP\">' : '');
   }
 
   /* ---------- area labels ---------- */
-  var labLayer = L.layerGroup().addTo(map), labMk = [];
+  var labLayer = L.layerGroup().addTo(map), labMk = [], lastV = [];
   ous.forEach(function(id, j) {
     if (!ok(D.lat[j]) || !ok(D.lng[j])) { labMk.push(null); return; }
     var mk = L.marker([D.lat[j], D.lng[j]], {interactive: false, keyboard: false,
@@ -614,35 +862,74 @@ function(el, x, D) {
     mk.addTo(labLayer); labMk.push(mk);
   });
   function setLabels(v) {
-    var z = map.getZoom();
+    lastV = v; var z = map.getZoom();
     labMk.forEach(function(mk, j) {
       if (!mk) return;
-      /* only label areas big enough on screen for their name (avoids clutter) */
       var l = lyr(ous[j]), fits = true;
       if (l && l.getBounds) {
         var b = l.getBounds(), p1 = map.latLngToContainerPoint(b.getSouthWest()),
             p2 = map.latLngToContainerPoint(b.getNorthEast());
         fits = Math.abs(p2.x - p1.x) >= names[j].length * 5.2 && Math.abs(p1.y - p2.y) >= 14;
       }
-      var fr = fracC(st.s, st.m, st.p, j);
+      var fr = fracC(st.m, j);
       var html = fits ? '<div>' + names[j] + (z >= 7 ? '<span>' + fmt(v[j]) +
-                 (fr ? ' <small style=\"font-weight:600;color:#555\">(' + fr + ')</small>' : '') + '</span>' : '') +
-                 '</div>' : '';
+                 (fr ? ' <small style=\"font-weight:600;color:#555\">(' + fr + ')</small>' : '') + '</span>' : '') + '</div>' : '';
       mk.setIcon(L.divIcon({className: 'kh-lab', html: html, iconSize: [0, 0]}));
     });
   }
-  cLab.addEventListener('change', function() {
-    if (cLab.checked) labLayer.addTo(map); else map.removeLayer(labLayer);
-  });
-  map.on('zoomend', function() { setLabels(vals(st.s, st.m, st.p)); });
+  cLab.addEventListener('change', function() { if (cLab.checked) labLayer.addTo(map); else map.removeLayer(labLayer); });
+  map.on('zoomend', function() { setLabels(lastV); });
+
+  /* ---------- popups ---------- */
+  function head(j, rank, nR) {
+    return '<div class=\"kh-h\" style=\"font-size:15px\">' + names[j] + '</div>' +
+      '<div class=\"kh-sub\">' + (isDel() ? A().label : D.services[st.s].label) + ' · ' + plab() + '</div>' +
+      (rank ? '<div class=\"kh-sub\" style=\"margin-top:2px\">Rank ' + rank + ' of ' + nR + ' on ' +
+              (isDel() ? V().label.toLowerCase() : selLabel().toLowerCase()) + '</div>' : '');
+  }
+  function popRep(j, rank, nR) {
+    var rows = '';
+    D.metrics.forEach(function(mm, k) {
+      var f2 = fracC(k, j);
+      rows += '<tr' + (k === st.m ? ' style=\"background:#eef3f9;font-weight:700\"' : '') +
+              '><td style=\"padding:2px 10px 2px 2px\">' + mm.label + '</td><td style=\"text-align:right;padding-right:2px\">' +
+              fmtR(repVals(st.s, k, st.p)[j], mm.type === 'rate') +
+              (f2 ? ' <span style=\"color:#666;font-weight:400\">(' + f2 + ')</span>' : '') + '</td></tr>';
+    });
+    return '<div style=\"font:12px Segoe UI,Arial;width:255px\">' + head(j, rank, nR) +
+      '<table style=\"width:100%;margin:6px 0;border-collapse:collapse\">' + rows + '</table>' +
+      '<div class=\"kh-sub\" style=\"margin-bottom:2px\">Reporting rate, last ' + NM + ' months (dashed = ' + D.target + '% target)</div>' +
+      trend(monthSeries(function(p) { return repVals(st.s, 0, p)[j]; }), true, 245, 46, false) + '</div>';
+  }
+  function popDel(j, rank, nR) {
+    var a = A(), ps = months(a), rows = '';
+    a.views.forEach(function(v, k) {
+      if (v.kind === 'item' && k !== st.vw) return;
+      rows += '<tr' + (k === st.vw ? ' class=\"sel\"' : '') + (k === 0 ? ' style=\"font-weight:800\"' : '') +
+              '><td>' + v.label + '</td><td>' + n0(viewCounty(v, a, j, ps)) + '</td></tr>';
+    });
+    return '<div style=\"font:12px Segoe UI,Arial;width:265px\">' + head(j, rank, nR) +
+      '<table class=\"kh-art\" style=\"width:100%;margin:6px 0\">' + rows + '</table>' +
+      '<div class=\"kh-sub\" style=\"margin-bottom:2px\">' + V().label + ' by month' + (a.stock ? ' (cumulative)' : '') + '</div>' +
+      trend(monthSeries(function(p) { return viewCounty(V(), a, j, [p]); }), false, 255, 46, false) + '</div>';
+  }
 
   /* ---------- render ---------- */
   function render() {
+    if (HAS_DEL) {
+      fBox.querySelectorAll('.kh-tabs button').forEach(function(b) { b.className = (b.getAttribute('data-mode') === st.mode) ? 'on' : ''; });
+      q('#kh-repf').style.display = isDel() ? 'none' : '';
+      q('#kh-delf').style.display = isDel() ? '' : 'none';
+      sAr.value = st.ar; sVw.value = st.vw; sF.value = st.f; sT.value = st.t;
+      sF.disabled = A().stock;
+      note.innerHTML = A().stock ? 'Cumulative indicator: shows the value at the <b>end month</b> of the range.'
+                                 : 'Monthly counts: <b>summed</b> over the months in the range.';
+    }
     sS.value = st.s; sM.value = st.m; sP.value = st.p;
-    bPrev.disabled = (st.p === ALL || st.p >= D.n_months - 1);
+    bPrev.disabled = (st.p === ALL || st.p >= NM - 1);
     bNext.disabled = (st.p === ALL || st.p <= 0);
-    var v = vals(st.s, st.m, st.p), br = isRate() ? [] : qbreaks(v), plab = D.periods[st.p].label;
-    setTitle(); setLabels(v);
+    var v = curVals(), br = isRate() ? [] : qbreaks(v);
+    setTitle(); setLabels(v); setSummary();
 
     var ranked = v.map(function(val, j) { return {j: j, val: val}; }).filter(function(r) { return ok(r.val); })
                   .sort(function(a, b) { return b.val - a.val; });
@@ -652,64 +939,45 @@ function(el, x, D) {
       var l = lyr(id); if (!l) return;
       var val = v[j];
       l.setStyle({fillColor: colour(val, br), fillOpacity: 0.88, weight: 1, color: 'white'});
-      var fr = fracC(st.s, st.m, st.p, j);
-      var tip = '<b>' + names[j] + '</b><br>' + M().label + ': <b>' + fmt(val) + '</b>' +
-                (fr ? '<br><span style=\"color:#555\">' + fr + ' reports (actual/expected)</span>' : '');
+      var fr = fracC(st.m, j);
+      var tip = '<b>' + names[j] + '</b><br>' + selLabel() + (isDel() ? ' · ' + selSub() : '') + ': <b>' + fmt(val) + '</b>' +
+                (fr ? '<br><span style=\"color:#555\">' + fr + ' reports (actual/expected)</span>' : '') +
+                (isDel() ? '<br><span style=\"color:#777\">' + plab() + '</span>' : '');
       if (l.getTooltip()) l.setTooltipContent(tip); else l.bindTooltip(tip, {sticky: true});
-
-      var rows = '';
-      D.metrics.forEach(function(mm, k) {
-        var f2 = fracC(st.s, k, st.p, j);
-        rows += '<tr' + (k === st.m ? ' style=\"background:#eef3f9;font-weight:700\"' : '') +
-                '><td style=\"padding:2px 10px 2px 2px\">' + mm.label + '</td><td style=\"text-align:right;padding-right:2px\">' +
-                fmt(vals(st.s, k, st.p)[j], mm) +
-                (f2 ? ' <span style=\"color:#666;font-weight:400\">(' + f2 + ')</span>' : '') + '</td></tr>';
-      });
-      var spark = trend(monthSeries(function(p) { return vals(st.s, 0, p)[j]; }),
-                        st.p === ALL ? -1 : D.n_months - 1 - st.p, true, 240, 46, false);
-      var pop = '<div style=\"font:12px Segoe UI,Arial;width:250px\">' +
-        '<div class=\"kh-h\" style=\"font-size:15px\">' + names[j] + '</div>' +
-        '<div class=\"kh-sub\">' + S().label + ' · ' + plab + '</div>' +
-        (rank[j] ? '<div class=\"kh-sub\" style=\"margin-top:2px\">Rank ' + rank[j] + ' of ' + ranked.length + ' on ' + M().label.toLowerCase() + '</div>' : '') +
-        '<table style=\"width:100%;margin:6px 0;border-collapse:collapse\">' + rows + '</table>' +
-        '<div class=\"kh-sub\" style=\"margin-bottom:2px\">Reporting rate, last ' + D.n_months + ' months (dashed = ' + D.target + '% target)</div>' +
-        spark + '</div>';
-      if (l.getPopup()) l.setPopupContent(pop); else l.bindPopup(pop, {maxWidth: 280});
+      var pop = isDel() ? popDel(j, rank[j], ranked.length) : popRep(j, rank[j], ranked.length);
+      if (l.getPopup()) l.setPopupContent(pop); else l.bindPopup(pop, {maxWidth: 290});
     });
 
     /* legend */
-    var h = '<div class=\"kh-h\">' + M().label + '</div><div class=\"kh-sub\" style=\"margin-bottom:6px\">' +
-            S().label + '<br>' + plab + '</div>' +
-            '<div style=\"margin-bottom:6px\">Kenya: <b style=\"font-size:14px;color:' + D.navy + '\">' +
-            fmt(natv(st.s, st.m, st.p)) + '</b>' +
-            (fracN(st.s, st.m, st.p) ? '<br><span class=\"kh-sub\">' + fracN(st.s, st.m, st.p) +
-             ' reports (actual/expected)</span>' : '') + '</div>';
+    var fN = fracN();
+    var h = '<div class=\"kh-h\">' + selLabel() + '</div><div class=\"kh-sub\" style=\"margin-bottom:6px\">' +
+            selSub() + '<br>' + plab() + '</div>' +
+            '<div style=\"margin-bottom:6px\">Kenya: <b style=\"font-size:14px;color:' + D.navy + '\">' + fmt(curNat()) + '</b>' +
+            (fN ? '<br><span class=\"kh-sub\">' + fN + ' reports (actual/expected)</span>' : '') + '</div>';
     if (isRate()) {
       for (var i = RC.length - 1; i >= 0; i--)
         h += '<div><i class=\"kh-sw\" style=\"background:' + RC[i] + '\"></i>' + RL[i] + '</div>';
     } else {
       for (var k = br.length - 1; k >= 1; k--)
-        h += '<div><i class=\"kh-sw\" style=\"background:' + colour(br[k], br) + '\"></i>' +
-             fmt(br[k - 1]) + ' – ' + fmt(br[k]) + '</div>';
+        h += '<div><i class=\"kh-sw\" style=\"background:' + colour(br[k], br) + '\"></i>' + fmt(br[k - 1]) + ' – ' + fmt(br[k]) + '</div>';
       if (br.length === 1) h += '<div><i class=\"kh-sw\" style=\"background:' + D.ramp[D.ramp.length - 1] + '\"></i>' + fmt(br[0]) + '</div>';
     }
-    h += '<div><i class=\"kh-sw\" style=\"background:' + NA_COL + '\"></i>No data / not expected</div>';
+    h += '<div><i class=\"kh-sw\" style=\"background:' + NA_COL + '\"></i>No data' + (isDel() ? '' : ' / not expected') + '</div>';
     lBox.innerHTML = h;
 
     /* trend + county list */
-    var series = monthSeries(function(p) { return natv(st.s, st.m, p); });
+    var series = isDel() ? monthSeries(function(p) { return viewNat(V(), A(), [p]); })
+                         : monthSeries(function(p) { return repNat(st.s, st.m, p); });
     var t = '<div class=\"kh-h\">Kenya trend</div><div class=\"kh-sub\" style=\"margin-bottom:4px\">' +
-            S().label + ' · ' + M().label + (isRate() ? ' · dashed = ' + D.target + '% target' : '') +
-            ' · click a bar</div>' +
-            trend(series, st.p === ALL ? -1 : D.n_months - 1 - st.p, isRate(), 266, 60, true);
-    var list = ranked.slice();
-    var lowFirst = isRate();
+            selSub() + ' · ' + selLabel() + (isRate() ? ' · dashed = ' + D.target + '% target' : '') +
+            (isDel() ? ' · by month' : '') + ' · click a bar</div>' + trend(series, isRate(), 266, 60, true);
+    var lowFirst = isRate(), list = ranked.slice();
     if (lowFirst) list.reverse();
     list = list.slice(0, 5);
-    t += '<div class=\"kh-h\" style=\"font-size:12px;margin-top:8px\">' +
-         (lowFirst ? 'Lowest 5 ' : 'Highest 5 ') + data_area() + '</div><table class=\"kh-list\">';
+    t += '<div class=\"kh-h\" style=\"font-size:12px;margin-top:8px\">' + (lowFirst ? 'Lowest 5 ' : 'Highest 5 ') +
+         data_area() + '</div><table class=\"kh-list\">';
     list.forEach(function(r) {
-      var f3 = fracC(st.s, st.m, st.p, r.j);
+      var f3 = fracC(st.m, r.j);
       t += '<tr><td>' + names[r.j] + '</td><td style=\"text-align:right\"><b>' + fmt(r.val) + '</b></td>' +
            (f3 ? '<td style=\"text-align:right;color:#666\">' + f3 + '</td>' : '') + '</tr>';
     });
@@ -717,19 +985,39 @@ function(el, x, D) {
     if (isRate() && ranked.length) {
       var met = ranked.filter(function(r) { return r.val >= D.target; }).length;
       t += '<div class=\"kh-sub\" style=\"margin-top:4px\"><b>' + met + ' of ' + ranked.length + '</b> ' +
-           data_area().toLowerCase() + ' at or above ' + D.target + '%</div>';
+           data_area() + ' at or above ' + D.target + '%</div>';
     }
     tBox.innerHTML = t;
     tBox.querySelectorAll('.kh-bar').forEach(function(b) {
-      b.addEventListener('click', function() { st.p = D.n_months - 1 - (+b.getAttribute('data-i')); render(); });
+      b.addEventListener('click', function() {
+        var p = +b.getAttribute('data-p');
+        if (isDel()) { st.f = p; st.t = p; } else st.p = p;
+        render();
+      });
     });
   }
-  function data_area() { return D.area === 'County' ? 'counties' : 'sub-counties'; }
 
+  /* ---------- events ---------- */
+  if (HAS_DEL) {
+    fBox.querySelectorAll('.kh-tabs button').forEach(function(b) {
+      b.addEventListener('click', function() { st.mode = b.getAttribute('data-mode'); render(); });
+    });
+    sAr.addEventListener('change', function() { st.ar = +sAr.value; st.vw = 0; buildViews(); render(); });
+    sVw.addEventListener('change', function() { st.vw = +sVw.value; render(); });
+    sF.addEventListener('change', function() { st.f = +sF.value; if (st.t > st.f) st.t = st.f; render(); });
+    sT.addEventListener('change', function() { st.t = +sT.value; if (st.f < st.t) st.f = st.t; render(); });
+    fBox.querySelectorAll('.kh-quick button').forEach(function(b) {
+      b.addEventListener('click', function() {
+        var qv = b.getAttribute('data-q'), n = (qv === 'fy') ? D.fy_n : +qv;
+        st.t = 0; st.f = Math.min(NM, n) - 1; render();
+      });
+    });
+    buildViews();
+  }
   sS.addEventListener('change', function() { st.s = +sS.value; render(); });
   sM.addEventListener('change', function() { st.m = +sM.value; render(); });
   sP.addEventListener('change', function() { st.p = +sP.value; render(); });
-  bPrev.addEventListener('click', function() { if (st.p < D.n_months - 1) { st.p++; render(); } });
+  bPrev.addEventListener('click', function() { if (st.p < NM - 1) { st.p++; render(); } });
   bNext.addEventListener('click', function() { if (st.p > 0) { st.p--; render(); } });
   render();
 }"
@@ -786,7 +1074,7 @@ print(m)   # view in RStudio Viewer
 tryCatch(
   saveWidget(m, out_html, selfcontained = TRUE, title = "County-Level HIV Service Provision in Kenya"),
   error = function(e) {
-    message("Pandoc not found — saving non-self-contained version (keep the _files folder with it).")
+    message("Pandoc not found: saving non-self-contained version (keep the _files folder with it).")
     saveWidget(m, out_html, selfcontained = FALSE, title = "County-Level HIV Service Provision in Kenya")
   })
 message("Map saved: ", normalizePath(out_html))
@@ -810,17 +1098,17 @@ summ <- bind_rows(latest_c, latest_n) |>
          across(c(rate, rate_ot), ~ ifelse(.x == "NA", NA_character_, .x))) |>
   select(svc, ou_uid, rate, rate_ot, reports) |>
   pivot_longer(c(rate, rate_ot, reports)) |>
-  mutate(col = paste0(svc_name[svc], c(rate = " — Rate %", rate_ot = " — On time %",
-                                       reports = " — Reports (actual/expected)")[name]),
-         col = factor(col, levels = as.vector(t(outer(svc_name, c(" — Rate %", " — On time %",
-                                                                   " — Reports (actual/expected)"), paste0))))) |>
+  mutate(col = paste0(svc_name[svc], c(rate = ": Rate %", rate_ot = ": On time %",
+                                       reports = ": Reports (actual/expected)")[name]),
+         col = factor(col, levels = as.vector(t(outer(svc_name, c(": Rate %", ": On time %",
+                                                                   ": Reports (actual/expected)"), paste0))))) |>
   arrange(col) |>
   select(ou_uid, col, value) |>
   pivot_wider(names_from = col, values_from = value) |>
   mutate(County = ifelse(ou_uid == "KENYA", "KENYA", ou_name[ou_uid]), .before = 1) |>
   arrange(County == "KENYA", County) |>
   select(-ou_uid) |>
-  mutate(across(contains("— Rate %") | contains("— On time %"), as.numeric))
+  mutate(across(contains(": Rate %") | contains(": On time %"), as.numeric))
 names(summ)[1] <- area_lab
 rate_cc <- which(grepl("Rate %|On time %", names(summ)))
 sh1 <- paste("Reporting", format(end_date, "%b %Y"))
@@ -868,5 +1156,61 @@ writeData(wb, "Datasets", services |> transmute(Service = service, `KHIS dataset
           headerStyle = hs)
 setColWidths(wb, "Datasets", cols = 1:4, widths = c(30, 70, 14, 22))
 
+
+# Sheets 4-7: Service delivery (clean variables)
+if (add_delivery && !is.null(del_long)) {
+  dl <- del_long |> mutate(Area = unname(ou_name[ou_uid]))
+  wide_sheet <- function(sheet, title, d) {
+    w <- d |> select(Area, variable, value) |>
+      mutate(variable = factor(variable, levels = del_cat$variable)) |>
+      arrange(variable) |>
+      pivot_wider(names_from = variable, values_from = value) |>
+      arrange(Area)
+    kenya <- as_tibble(c(list(Area = "KENYA"), lapply(w[-1], sum_na)))
+    w <- bind_rows(w, kenya); names(w)[1] <- area_lab
+    addWorksheet(wb, sheet)
+    writeData(wb, sheet, title, startRow = 1)
+    addStyle(wb, sheet, createStyle(textDecoration = "bold", fontColour = navy, fontSize = 12), rows = 1, cols = 1)
+    writeData(wb, sheet, w, startRow = 3, headerStyle = hs)
+    addStyle(wb, sheet, createStyle(numFmt = "#,##0"), rows = 4:(nrow(w) + 3), cols = 2:ncol(w), gridExpand = TRUE)
+    addStyle(wb, sheet, tot_style, rows = nrow(w) + 3, cols = seq_along(w), gridExpand = TRUE, stack = TRUE)
+    setColWidths(wb, sheet, cols = 1, widths = 20)
+    setColWidths(wb, sheet, cols = 2:ncol(w), widths = 14)
+    setRowHeights(wb, sheet, rows = 3, heights = 75)
+    freezePane(wb, sheet, firstActiveRow = 4, firstActiveCol = 2)
+  }
+  # latest month
+  wide_sheet(paste("Delivery", format(end_date, "%b %Y")),
+             paste0("Service delivery by ", tolower(area_lab), ": ", mlab(months[1]), " · Source: KHIS"),
+             filter(dl, pe == months[1]))
+  # last n months: flows summed, cumulative (On ART) = end-month value
+  d12 <- dl |>
+    group_by(Area, ix, variable, stock) |>
+    summarise(value = if (first(stock)) sum_na(value[pe == months[1]]) else sum_na(value), .groups = "drop")
+  wide_sheet(paste("Delivery", n_months, "months"),
+             paste0("Service delivery: ", all_lab, " (monthly counts summed; On ART = value at ",
+                    mlab(months[1]), ") · Source: KHIS"), d12)
+  # long
+  del_out <- dl |>
+    left_join(select(del_cat, ix, `Data element code` = code), by = "ix") |>
+    mutate(Month = pe, Period = mlab(pe), Type = ifelse(stock, "Cumulative (stock)", "Monthly count")) |>
+    arrange(match(variable, del_cat$variable), desc(Month), Area) |>
+    transmute(`Programme area` = area, Variable = variable, `Data element code`, Type,
+              Area, Period, Month, Value = value)
+  names(del_out)[names(del_out) == "Area"] <- area_lab
+  addWorksheet(wb, "Delivery all months")
+  writeData(wb, "Delivery all months", del_out, headerStyle = hs)
+  setColWidths(wb, "Delivery all months", cols = 1:ncol(del_out), widths = c(30, 46, 12, 18, 20, 10, 9, 10))
+  freezePane(wb, "Delivery all months", firstRow = TRUE)
+  addFilter(wb, "Delivery all months", rows = 1, cols = 1:ncol(del_out))
+  # dictionary
+  addWorksheet(wb, "Delivery variables")
+  writeData(wb, "Delivery variables",
+            del_cat |> transmute(`Programme area` = area, `Clean variable` = variable, Code = code,
+                                 Type = ifelse(stock, "Cumulative (stock): use end-month value", "Monthly count: sum over months"),
+                                 `KHIS data element` = khis_name, UID = uid),
+            headerStyle = hs)
+  setColWidths(wb, "Delivery variables", cols = 1:6, widths = c(32, 48, 12, 36, 70, 14))
+}
 saveWorkbook(wb, out_xlsx, overwrite = TRUE)
 message("Workbook saved: ", normalizePath(out_xlsx))
