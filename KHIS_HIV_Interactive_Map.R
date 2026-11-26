@@ -37,6 +37,7 @@ if (length(still_missing)) stop("These packages failed to install: ",
                                 "')) and read the error it prints.")
 invisible(lapply(pkgs, library, character.only = TRUE))
 sf::sf_use_s2(FALSE)
+`%||%` <- function(a, b) if (is.null(a)) b else a
 
 # ---- 1. CONFIG ---------------------------------------------------------------
 base_url <- "https://hiskenya.dha.go.ke"
@@ -161,7 +162,7 @@ del_cat <- bind_rows(
     mutate(area = "HIV positive (HTS)", short = "HTS positive"),
   tibble(area = "HIV self-test kits used", short = "Self-test kits", code = c("643B-ORAL", "643B-BLOOD"),
          grp = c("Oral", "Blood-based"),
-         match = c("643B.*self.?test.*oral", "643B.*self.?test.*blood")),
+         match = c("643B.*self.?test.*oral", "643B.*self.?test.*blood"), exact_only = TRUE),
   prep_rows("PrEP: new initiations", "PrEP new", 19),
   prep_rows("PrEP: diagnosed with STI", "PrEP STI", 32),
   agesex("HV03-", 1:14, art_ages)  |> mutate(area = "ART: newly started", short = "Started ART"),
@@ -175,7 +176,7 @@ del_cat <- bind_rows(
          code = sprintf("HV02-%02d", 15:18), grp = spoint),
   tibble(area = "EMTCT: HBV screened positive", short = "HBV screened positive", code = "HV02-20")
 ) |>
-  mutate(stock = coalesce(stock, FALSE),
+  mutate(stock = coalesce(stock, FALSE), exact_only = coalesce(exact_only, FALSE),
          match = coalesce(match, paste0(code, "(?![0-9])")))
 for (cc in c("grp", "age", "sex")) if (!cc %in% names(del_cat)) del_cat[[cc]] <- NA_character_
 # single-sex groups (MSM, FSW, PBFW) don't repeat the sex in their name
@@ -614,7 +615,10 @@ if (add_delivery) {
     if (NROW(x)) as_tibble(x) |> mutate(type = sub("s$", "", endpoint))
     else tibble(id = character(), name = character(), type = character())
   }
+  # MOH 643B is a commodity form: "Number of Tests done" is one column (category option combo)
+  # of the data element, so it is looked up as a data element OPERAND (id = element.combo).
   cand <- bind_rows(srch("indicators", "MOH 731"), srch("indicators", "643B"),
+                    srch("dataElementOperands", "643B"),
                     srch("dataElements", "MOH 731"), srch("dataElements", "643B")) |>
     distinct(id, .keep_all = TRUE) |>
     mutate(key = tolower(str_squish(name)))
@@ -627,17 +631,17 @@ if (add_delivery) {
     hit <- NULL
     if (!is.na(del_cat$exact_name[i])) {                       # 1. exact KHIS name
       hit <- cand |> filter(key == tolower(str_squish(del_cat$exact_name[i]))) |>
-        arrange(desc(type == "indicator"))
+        arrange(desc(type == "indicator"), desc(type == "dataElementOperand"))
       if (nrow(hit)) del_cat$match_by[i] <- "exact name"
     }
-    if (is.null(hit) || !nrow(hit)) {                           # 2. code, Rev 2023 naming only
+    if ((is.null(hit) || !nrow(hit)) && !del_cat$exact_only[i]) { # 2. code, Rev 2023 naming only
       hit <- cand |>
         filter(str_detect(name, regex(del_cat$match[i], ignore_case = TRUE)),
                str_detect(name, regex("^MOH 731_|643B_Rev 2023", ignore_case = TRUE))) |>
         arrange(desc(type == "indicator"), nchar(name))
       if (nrow(hit)) del_cat$match_by[i] <- "code (check!)"
     }
-    if (nrow(hit)) { del_cat$uid[i] <- hit$id[1]; del_cat$khis_name[i] <- hit$name[1]
+    if (!is.null(hit) && nrow(hit)) { del_cat$uid[i] <- hit$id[1]; del_cat$khis_name[i] <- hit$name[1]
                      del_cat$khis_type[i] <- hit$type[1] }
   }
   cat("\n", strrep("=", 90), "\n  SERVICE DELIVERY: clean variable  <-  KHIS data element\n",
@@ -721,6 +725,9 @@ if (add_delivery) {
       cat("Compared with KHIS export file:", khis_export_file, "\n")
     } else warning("Could not find the 'dataname' header row in ", khis_export_file)
   }
+  st_rows <- check |> filter(code %in% c("643B-ORAL", "643B-BLOOD"), pe == months[1])
+  if (nrow(st_rows)) { cat("\nHIV self-test kits used, Kenya", mlab(months[1]), ":\n")
+    cat(sprintf("  %-40s %s\n", st_rows$variable, scales::comma(st_rows$khis_kenya)), sep = "") }
   n_bad <- sum(abs(check$diff) > 0.5, na.rm = TRUE)
   cat("\nDATA CHECK: county totals vs KHIS Kenya value —", nrow(check) - n_bad, "of", nrow(check),
       "item-months match exactly.\n")
