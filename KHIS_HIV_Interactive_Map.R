@@ -18,7 +18,7 @@
 
 # ---- 0. PACKAGES -------------------------------------------------------------
 pkgs <- c("httr2", "jsonlite", "dplyr", "tidyr", "purrr", "stringr", "tibble",
-          "sf", "leaflet", "htmlwidgets", "htmltools", "openxlsx", "scales")
+          "sf", "leaflet", "htmlwidgets", "htmltools", "openxlsx", "scales", "readxl")
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 # Install into your personal library if the system library is not writable
 user_lib <- Sys.getenv("R_LIBS_USER")
@@ -164,8 +164,6 @@ del_cat <- bind_rows(
          match = c("643B.*self.?test.*oral", "643B.*self.?test.*blood")),
   prep_rows("PrEP: new initiations", "PrEP new", 19),
   prep_rows("PrEP: diagnosed with STI", "PrEP STI", 32),
-  tibble(area = "PrEP: seroconverted (HIV+)", short = "PrEP seroconverted",
-         code = c("HV01-45", "HV01-46"), sex = c("M", "F")),
   agesex("HV03-", 1:14, art_ages)  |> mutate(area = "ART: newly started", short = "Started ART"),
   agesex("HV03-", 15:28, art_ages) |> mutate(area = "ART: currently on ART (cumulative)",
                                              short = "On ART", stock = TRUE),
@@ -189,6 +187,98 @@ del_cat <- del_cat |>
            if (length(parts)) paste(parts, collapse = ", ") else "Total" }),
          variable = ifelse(detail == "Total", short, paste0(short, ": ", detail))) |>
   select(-n_sex)
+# Exact KHIS names (as in KHIS Data Visualizer / pivot table). Matching uses these FIRST,
+# searching both KHIS indicators and data elements, so the map shows the same numbers as KHIS.
+khis_exact <- tribble(
+  ~code, ~exact_name,
+  "HV03-18", "MOH 731_HIV_TB_OnART_1-4 (F) HV03-18",
+  "HV03-17", "MOH 731_HIV_TB_OnART_1-4 (M) HV03-17",
+  "HV03-22", "MOH 731_HIV_TB_OnART_10-14_(F)_HV03-22",
+  "HV03-21", "MOH 731_HIV_TB_OnART_10-14_(M)_HV03-21",
+  "HV03-24", "MOH 731_HIV_TB_OnART_15-19_(F)_HV03-24",
+  "HV03-23", "MOH 731_HIV_TB_OnART_15-19_(M)_HV03-23",
+  "HV03-26", "MOH 731_HIV_TB_OnART_20-24_(F)_HV03-26",
+  "HV03-25", "MOH 731_HIV_TB_OnART_20-24_(M)_HV03-25",
+  "HV03-28", "MOH 731_HIV_TB_OnART_25+_(F)_HV03-28",
+  "HV03-27", "MOH 731_HIV_TB_OnART_25+_(M)_HV03-27",
+  "HV03-20", "MOH 731_HIV_TB_OnART_5-9 (F) HV03-20",
+  "HV03-19", "MOH 731_HIV_TB_OnART_5-9(M)HV03-19",
+  "HV03-16", "MOH 731_HIV_TB_OnART_<1 (F) HV03-16",
+  "HV03-15", "MOH 731_HIV_TB_OnART_<1 (M) HV03-15",
+  "HV01-03", "MOH 731_HTS_Tests_facility_HV01-03",
+  "HV01-09", "MOH 731_HTS_Positive_10-14 _(F) (Including PMTCT)_HV01-09",
+  "HV01-08", "MOH 731_HTS_Positive_10-14 _(M)_HV01-08",
+  "HV01-11", "MOH 731_HTS_Positive_15-19 _(F) (Including PMTCT)_HV01-11",
+  "HV01-10", "MOH 731_HTS_Positive_15-19 _(M)_HV01-10",
+  "HV01-07", "MOH 731_HTS_Positive_2-9 _(F) (Including PMTCT)_ HV01-07",
+  "HV01-06", "MOH 731_HTS_Positive_2-9 _(M)_ HV01-06",
+  "HV01-13", "MOH 731_HTS_Positive_20-24 _(F) (Including PMTCT)_HV01-13",
+  "HV01-12", "MOH 731_HTS_Positive_20-24 _(M)_HV01-12",
+  "HV01-15", "MOH 731_HTS_Positive_25+ _(F) (Including PMTCT)_HV01-15",
+  "HV01-14", "MOH 731_HTS_Positive_25+ _(M)_HV01-14",
+  "HV01-30", "MOH 731_HTS_No. Initiated on PrEP (NEW)_AYP (15-24yrs) _(F)_ HV01-30",
+  "HV01-29", "MOH 731_HTS_No. Initiated on PrEP (NEW)_AYP (15-24yrs) _(M)_ HV01-29",
+  "HV01-26", "MOH 731_HTS_No. Initiated on PrEP (NEW)_Discordant Couple _(F)_ HV01-26",
+  "HV01-25", "MOH 731_HTS_No. Initiated on PrEP (NEW)_Discordant Couple _(M)_ HV01-25",
+  "HV01-22", "MOH 731_HTS_No. Initiated on PrEP (NEW)_FSW_ HV01-22",
+  "HV01-20", "MOH 731_HTS_No. Initiated on PrEP (NEW)_General popn _(F)_ HV01-20",
+  "HV01-19", "MOH 731_HTS_No. Initiated on PrEP (NEW)_General popn _(M)_ HV01-19",
+  "HV01-21", "MOH 731_HTS_No. Initiated on PrEP (NEW)_MSM/MSW _ HV01-21",
+  "HV01-24", "MOH 731_HTS_No. Initiated on PrEP (NEW)_PWID/PWUD _(F)_ HV01-24",
+  "HV01-23", "MOH 731_HTS_No. Initiated on PrEP (NEW)_PWID/PWUD _(M)_ HV01-23",
+  "HV01-31", "MOH 731_HTS_No. Initiated on PrEP (NEW)_Pregnant and breastfeeding women HV01-31",
+  "HV01-28", "MOH 731_HTS_No. Initiated on PrEP (NEW)_Vulnerable Pop. _(F)_ HV01-28",
+  "HV01-27", "MOH 731_HTS_No. Initiated on PrEP (NEW)_Vulnerable Pop. _(M)_ HV01-27",
+  "HV01-44", "MOH 731_HTS_No. on PrEP Diagnosed with STI_)_Pregnant and breastfeeding women HV01-44",
+  "HV01-43", "MOH 731_HTS_No. on PrEP Diagnosed with STI_AYP (15-24 yrs) _(F)_ HV01-43",
+  "HV01-42", "MOH 731_HTS_No. on PrEP Diagnosed with STI_AYP (15-24 yrs) _(M)_ HV01-42",
+  "HV01-39", "MOH 731_HTS_No. on PrEP Diagnosed with STI_Discordant _(F)_ Couple HV01-39",
+  "HV01-38", "MOH 731_HTS_No. on PrEP Diagnosed with STI_Discordant _(M)_ Couple HV01-38",
+  "HV01-35", "MOH 731_HTS_No. on PrEP Diagnosed with STI_FSW_ HV01-35",
+  "HV01-33", "MOH 731_HTS_No. on PrEP Diagnosed with STI_General popn _(F)_ HV01-33",
+  "HV01-32", "MOH 731_HTS_No. on PrEP Diagnosed with STI_General popn _(M)_ HV01-32",
+  "HV01-34", "MOH 731_HTS_No. on PrEP Diagnosed with STI_MSM/MSW_HV01-34",
+  "HV01-37", "MOH 731_HTS_No. on PrEP Diagnosed with STI_PWID/PWUD _(F)_ HV01-37",
+  "HV01-36", "MOH 731_HTS_No. on PrEP Diagnosed with STI_PWID/PWUD _(M)_ HV01-36",
+  "HV01-41", "MOH 731_HTS_No. on PrEP Diagnosed with STI_Vulnerable Pop. _(F)_ HV01-41",
+  "HV01-40", "MOH 731_HTS_No. on PrEP Diagnosed with STI_Vulnerable Pop. _(M)_ HV01-40",
+  "643B-ORAL", "MOH 643B_Rev 2023_HIV self test kit- oral Number of Tests done",
+  "643B-BLOOD", "MOH 643B_Rev 2023_HIV self test kit- Blood based Number of Tests done",
+  "HV03-04", "MOH 731_HIV_TB_StartART_1-4 (F) HV03-04",
+  "HV03-03", "MOH 731_HIV_TB_StartART_1-4 (M) HV03-03",
+  "HV03-08", "MOH 731_HIV_TB_StartART_10-14_(F)_HV03-08",
+  "HV03-07", "MOH 731_HIV_TB_StartART_10-14_(M)_HV03-07",
+  "HV03-10", "MOH 731_HIV_TB_StartART_15-19_(F)_HV03-10",
+  "HV03-09", "MOH 731_HIV_TB_StartART_15-19_(M)_HV03-09",
+  "HV03-12", "MOH 731_HIV_TB_StartART_20-24_(F)_HV03-12",
+  "HV03-11", "MOH 731_HIV_TB_StartART_20-24_(M)_HV03-11",
+  "HV03-14", "MOH 731_HIV_TB_StartART_25+_(F)_HV03-14",
+  "HV03-13", "MOH 731_HIV_TB_StartART_25+_(M)_HV03-13",
+  "HV03-06", "MOH 731_HIV_TB_StartART_5-9 (F) HV03-06",
+  "HV03-05", "MOH 731_HIV_TB_StartART_5-9 (M) HV03-05",
+  "HV03-02", "MOH 731_HIV_TB_StartART_<1 (F) HV03-02",
+  "HV03-01", "MOH 731_HIV_TB_StartART_<1 (M) HV03-01",
+  "HV02-15", "MOH 731_EMTCT_Start HAART_ANC_HV02-15",
+  "HV02-16", "MOH 731_EMTCT_Start HAART_L&D_HV02-16",
+  "HV02-17", "MOH 731_EMTCT_Start HAART_PNC <= 6 weeks_HV02-17",
+  "HV02-18", "MOH 731_EMTCT_Start HAART_PNC>6weeks_HV02-18",
+  "HV02-02", "MOH 731_EMTCT_Tested at ANC_Initial_HV02-02",
+  "HV02-04", "MOH 731_EMTCT_Tested at L&D_Initial_HV02-04",
+  "HV02-06", "MOH 731_EMTCT_Tested at PNC_<=6 weeks_Initial_HV02-06",
+  "HV02-08", "MOH 731_EMTCT_Tested at PNC_>6 weeks_Initial_HV02-08",
+  "HV02-20", "MOH 731_EMTCT_HBV Screened_Positive_HV02-20",
+  "HV02-13", "MOH 731_EMTCT_Positive PNC >6weeks_HV02-13",
+  "HV02-11", "MOH 731_EMTCT_Positive Results _L&D_HV02-11",
+  "HV02-10", "MOH 731_EMTCT_Positive Results_ANC_HV02-10",
+  "HV02-12", "MOH 731_EMTCT_Positive Results_PNC <=6weeks_HV02-12"
+)
+del_cat <- left_join(del_cat, khis_exact, by = "code")
+
+# ---- Data check against KHIS -------------------------------------------------
+# 1) The script always compares the county totals with the Kenya value pulled directly from KHIS.
+# 2) Optional: put a KHIS export (Data Visualizer -> Download -> Excel, data in rows = items,
+#    columns = months, org unit = Kenya) in this folder and give its file name here:
+khis_export_file <- ""   # e.g. "data - 2026-11-26T091540.382.xls"
 del_uid_override <- character(0)   # e.g. c("HV01-03" = "abcdEFGhij1")
 
 navy      <- "#1F4E79"
@@ -336,8 +426,65 @@ shp <- shp |>
   st_simplify(preserveTopology = TRUE, dTolerance = 0.003) |>
   mutate(ou_name = str_squish(str_remove(ou_name, regex("\\s*County$", ignore_case = TRUE)))) |>
   arrange(ou_name)
+
+# ---- 4a. CLEAN BOUNDARIES (fixes misplaced shapes, e.g. Migori) -------------
+# KHIS polygons can contain stray pieces: parts with latitude/longitude swapped, parts
+# outside Kenya, or tiny fragments far from the county. These are fixed or dropped, and
+# each county's label goes on its main (largest) piece.
+ken_box <- c(xmin = 33.4, xmax = 42.4, ymin = -5.2, ymax = 5.6)
+in_kenya <- function(p) { bb <- st_bbox(p)
+  bb[["xmin"]] >= ken_box[["xmin"]] && bb[["xmax"]] <= ken_box[["xmax"]] &&
+  bb[["ymin"]] >= ken_box[["ymin"]] && bb[["ymax"]] <= ken_box[["ymax"]] }
+swap_xy <- function(p) st_polygon(lapply(p, function(r) r[, c(2, 1), drop = FALSE]))
+geom_log <- character(0)
+clean_geom <- function(g, nm) {
+  parts <- if (inherits(g, "MULTIPOLYGON")) lapply(g, st_polygon)
+           else if (inherits(g, "POLYGON")) list(g)
+           else lapply(st_cast(st_sfc(g), "POLYGON"), identity)
+  out <- list()
+  for (p in parts) {
+    if (in_kenya(p)) { out[[length(out) + 1]] <- p; next }
+    sp <- swap_xy(p)
+    if (in_kenya(sp)) { out[[length(out) + 1]] <- sp
+      geom_log <<- c(geom_log, paste0(nm, ": part with lat/long swapped — corrected")); next }
+    geom_log <<- c(geom_log, paste0(nm, ": part outside Kenya — removed"))
+  }
+  if (!length(out)) { geom_log <<- c(geom_log, paste0(nm, ": no valid shape left — kept original")); return(g) }
+  if (length(out) > 1) {
+    pl   <- st_sfc(out)                                   # planar (degrees) for area/distance
+    a    <- as.numeric(st_area(pl)); main <- which.max(a)
+    d    <- as.numeric(st_distance(pl, pl[main]))
+    keep <- a >= 0.02 * max(a) | d <= 0.3
+    if (any(!keep)) geom_log <<- c(geom_log, paste0(nm, ": ", sum(!keep), " stray fragment(s) far from the county — removed"))
+    out <- out[keep]
+  }
+  st_multipolygon(lapply(out, unclass))
+}
+crs_shp <- st_crs(shp)
+g_clean <- mapply(clean_geom, st_geometry(shp), shp$ou_name, SIMPLIFY = FALSE)
+st_geometry(shp) <- st_sfc(g_clean, crs = crs_shp)
+shp <- st_make_valid(shp)
+if (length(geom_log)) { cat("\nBOUNDARY FIXES:\n"); cat(paste0("  ", geom_log, "\n"), sep = "") } else
+  cat("Boundaries checked: no misplaced pieces found.\n")
+
 ou_order <- shp$ou_uid
-lab_pts  <- suppressWarnings(st_coordinates(st_point_on_surface(st_geometry(shp))))  # label positions
+# label position = point inside the county's largest piece
+main_piece <- function(g) {
+  ps <- if (inherits(g, "MULTIPOLYGON")) lapply(g, st_polygon) else list(g)
+  if (length(ps) == 1) return(ps[[1]])
+  ps[[which.max(vapply(ps, function(p) as.numeric(st_area(st_sfc(p))), numeric(1)))]]
+}
+lab_pts <- do.call(rbind, lapply(st_geometry(shp), function(g)
+  st_coordinates(suppressWarnings(st_point_on_surface(main_piece(g))))[1, 1:2, drop = FALSE]))
+colnames(lab_pts) <- c("X", "Y")
+# Manual label positions if a name still sits in the wrong place: c(longitude, latitude)
+label_override <- list(
+  # "Migori" = c(34.42, -1.06)
+)
+for (nm in names(label_override)) {
+  k <- which(tolower(shp$ou_name) == tolower(nm))
+  if (length(k)) lab_pts[k, ] <- label_override[[nm]]
+}
 
 # Kenya outline + soft mask outside Kenya (makes the country stand out)
 kenya   <- st_make_valid(st_union(st_geometry(shp)))
@@ -461,25 +608,44 @@ print(national |> filter(pe == months[1]) |>
 # ---- 5b. SERVICE DELIVERY DATA (monthly, county) ------------------------------
 del_js <- NULL; del_long <- NULL
 if (add_delivery) {
-  srch <- function(term) {
+  srch <- function(endpoint, term) {
     q <- list(filter = paste0("name:ilike:", term), fields = "id,name", paging = "false")
-    x <- dhis_get("dataElements", q)$dataElements
-    if (NROW(x)) as_tibble(x) else tibble(id = character(), name = character())
+    x <- tryCatch(dhis_get(endpoint, q)[[endpoint]], error = function(e) NULL)
+    if (NROW(x)) as_tibble(x) |> mutate(type = sub("s$", "", endpoint))
+    else tibble(id = character(), name = character(), type = character())
   }
-  cand <- distinct(bind_rows(srch("MOH 731"), srch("643B")), id, .keep_all = TRUE)
-  del_cat$uid <- NA_character_; del_cat$khis_name <- NA_character_
+  cand <- bind_rows(srch("indicators", "MOH 731"), srch("indicators", "643B"),
+                    srch("dataElements", "MOH 731"), srch("dataElements", "643B")) |>
+    distinct(id, .keep_all = TRUE) |>
+    mutate(key = tolower(str_squish(name)))
+  del_cat$uid <- NA_character_; del_cat$khis_name <- NA_character_; del_cat$khis_type <- NA_character_
+  del_cat$match_by <- NA_character_
   for (i in seq_len(nrow(del_cat))) {
     ov <- unname(del_uid_override[del_cat$code[i]])
-    if (length(ov) == 1 && !is.na(ov) && nzchar(ov)) { del_cat$uid[i] <- ov; next }
-    hit <- cand |>
-      filter(str_detect(name, regex(del_cat$match[i], ignore_case = TRUE))) |>
-      arrange(desc(str_detect(name, "^MOH 731_|Rev 2023")), nchar(name))
-    if (nrow(hit)) { del_cat$uid[i] <- hit$id[1]; del_cat$khis_name[i] <- hit$name[1] }
+    if (length(ov) == 1 && !is.na(ov) && nzchar(ov)) {
+      del_cat$uid[i] <- ov; del_cat$match_by[i] <- "manual uid"; next }
+    hit <- NULL
+    if (!is.na(del_cat$exact_name[i])) {                       # 1. exact KHIS name
+      hit <- cand |> filter(key == tolower(str_squish(del_cat$exact_name[i]))) |>
+        arrange(desc(type == "indicator"))
+      if (nrow(hit)) del_cat$match_by[i] <- "exact name"
+    }
+    if (is.null(hit) || !nrow(hit)) {                           # 2. code, Rev 2023 naming only
+      hit <- cand |>
+        filter(str_detect(name, regex(del_cat$match[i], ignore_case = TRUE)),
+               str_detect(name, regex("^MOH 731_|643B_Rev 2023", ignore_case = TRUE))) |>
+        arrange(desc(type == "indicator"), nchar(name))
+      if (nrow(hit)) del_cat$match_by[i] <- "code (check!)"
+    }
+    if (nrow(hit)) { del_cat$uid[i] <- hit$id[1]; del_cat$khis_name[i] <- hit$name[1]
+                     del_cat$khis_type[i] <- hit$type[1] }
   }
   cat("\n", strrep("=", 90), "\n  SERVICE DELIVERY: clean variable  <-  KHIS data element\n",
       strrep("=", 90), "\n", sep = "")
-  cat(sprintf("  %-10s %-52s <- %s\n", del_cat$code, del_cat$variable,
-              ifelse(is.na(del_cat$uid), "NOT FOUND", del_cat$khis_name)), sep = "")
+  cat(sprintf("  %-10s %-48s <- %s  [%s, %s]\n", del_cat$code, del_cat$variable,
+              ifelse(is.na(del_cat$uid), "NOT FOUND", del_cat$khis_name),
+              ifelse(is.na(del_cat$khis_type), "-", del_cat$khis_type),
+              ifelse(is.na(del_cat$match_by), "-", del_cat$match_by)), sep = "")
   cat("  To force an element: del_uid_override <- c(\"HV01-03\" = \"<uid>\")\n", strrep("=", 90), "\n", sep = "")
   if (any(is.na(del_cat$uid))) warning("Not found in KHIS and left out: ",
                                        paste(del_cat$variable[is.na(del_cat$uid)], collapse = "; "))
@@ -518,6 +684,59 @@ if (add_delivery) {
     d <- del_long[del_long$ix == i, ]
     nv(vapply(months, function(p) sum_na(d$value[d$pe == p]), numeric(1)))
   })
+
+  # ---- DATA CHECK: county totals vs Kenya value straight from KHIS -------------
+  message("Checking data against KHIS national values ...")
+  nat_direct <- map_dfr(split(unique(del_cat$uid), ceiling(seq_along(unique(del_cat$uid)) / 20)), function(ids) {
+    res <- tryCatch(dhis_get("analytics.json", list(
+      dimension = c(paste0("dx:", paste(ids, collapse = ";")), paste0("pe:", paste(months, collapse = ";")),
+                    paste0("ou:", root_ou)), skipMeta = "true")), error = function(e) NULL)
+    if (is.null(res) || !length(res$rows)) return(NULL)
+    df <- as.data.frame(res$rows, stringsAsFactors = FALSE); names(df) <- res$headers$name
+    tibble(uid = df$dx, pe = df$pe, khis_kenya = as.numeric(df$value))
+  })
+  if (!nrow(nat_direct)) nat_direct <- tibble(uid = character(), pe = character(), khis_kenya = numeric())
+  check <- del_long |>
+    group_by(ix, pe) |> summarise(map_kenya = sum_na(value), .groups = "drop") |>
+    left_join(select(del_cat, ix, code, variable, uid), by = "ix") |>
+    left_join(nat_direct, by = c("uid", "pe")) |>
+    mutate(diff = coalesce(map_kenya, 0) - coalesce(khis_kenya, 0))
+  # optional: compare with a KHIS export file
+  if (nzchar(khis_export_file) && file.exists(khis_export_file)) {
+    ex <- readxl::read_excel(khis_export_file, col_names = FALSE, .name_repair = "minimal")
+    hdr <- which(trimws(as.character(ex[[1]])) == "dataname")[1]
+    if (!is.na(hdr)) {
+      mcols <- as.character(unlist(ex[hdr, -1]))
+      pes   <- format(as.Date(paste("1", mcols), "%d %B %Y"), "%Y%m")
+      exl <- ex[(hdr + 1):nrow(ex), ] |> setNames(c("exact_name", pes)) |>
+        filter(!is.na(exact_name)) |>
+        mutate(across(-exact_name, ~ suppressWarnings(as.numeric(.x)))) |>
+        pivot_longer(-exact_name, names_to = "pe", values_to = "export_value") |>
+        mutate(key = tolower(str_squish(exact_name)))
+      check <- check |>
+        left_join(select(del_cat, ix, exact_name), by = "ix") |>
+        mutate(key = tolower(str_squish(exact_name))) |>
+        left_join(select(exl, key, pe, export_value), by = c("key", "pe")) |>
+        select(-key)
+      cat("Compared with KHIS export file:", khis_export_file, "\n")
+    } else warning("Could not find the 'dataname' header row in ", khis_export_file)
+  }
+  n_bad <- sum(abs(check$diff) > 0.5, na.rm = TRUE)
+  cat("\nDATA CHECK: county totals vs KHIS Kenya value —", nrow(check) - n_bad, "of", nrow(check),
+      "item-months match exactly.\n")
+  if (n_bad) { cat("  Mismatches (first 15):\n")
+    print(head(as.data.frame(filter(check, abs(diff) > 0.5) |>
+                               select(code, variable, pe, map_kenya, khis_kenya, diff)), 15)) }
+  if ("export_value" %in% names(check)) {
+    ex_bad <- filter(check, !is.na(export_value), abs(coalesce(khis_kenya, 0) - export_value) > 0.5)
+    cat("  KHIS export vs pulled Kenya values:", nrow(ex_bad), "mismatch(es).\n")
+    if (nrow(ex_bad)) print(head(as.data.frame(select(ex_bad, code, variable, pe, khis_kenya, export_value)), 15))
+  }
+
+  # Kenya figures on the map = KHIS national value (as in KHIS dashboards); county sum if missing
+  check <- mutate(check, kenya = ifelse(is.na(khis_kenya), map_kenya, khis_kenya))
+  del_nat <- lapply(del_cat$ix, function(i) {
+    d <- check[check$ix == i, ]; nv(d$kenya[match(months, d$pe)]) })
 
   mk_views <- function(it) {
     V <- list(list(label = "Total", kind = "agg", idx = I(it$ix)))
@@ -1160,13 +1379,15 @@ setColWidths(wb, "Datasets", cols = 1:4, widths = c(30, 70, 14, 22))
 # Sheets 4-7: Service delivery (clean variables)
 if (add_delivery && !is.null(del_long)) {
   dl <- del_long |> mutate(Area = unname(ou_name[ou_uid]))
-  wide_sheet <- function(sheet, title, d) {
+  wide_sheet <- function(sheet, title, d, kenya_vals) {
     w <- d |> select(Area, variable, value) |>
       mutate(variable = factor(variable, levels = del_cat$variable)) |>
       arrange(variable) |>
       pivot_wider(names_from = variable, values_from = value) |>
       arrange(Area)
-    kenya <- as_tibble(c(list(Area = "KENYA"), lapply(w[-1], sum_na)))
+    kenya <- as_tibble(c(list(Area = "KENYA (KHIS national)"),
+                         lapply(names(w)[-1], function(v) unname(kenya_vals[v]))) |>
+                       setNames(c("Area", names(w)[-1])))
     w <- bind_rows(w, kenya); names(w)[1] <- area_lab
     addWorksheet(wb, sheet)
     writeData(wb, sheet, title, startRow = 1)
@@ -1182,14 +1403,19 @@ if (add_delivery && !is.null(del_long)) {
   # latest month
   wide_sheet(paste("Delivery", format(end_date, "%b %Y")),
              paste0("Service delivery by ", tolower(area_lab), ": ", mlab(months[1]), " · Source: KHIS"),
-             filter(dl, pe == months[1]))
+             filter(dl, pe == months[1]),
+             with(filter(check, pe == months[1]), setNames(kenya, variable)))
   # last n months: flows summed, cumulative (On ART) = end-month value
   d12 <- dl |>
     group_by(Area, ix, variable, stock) |>
     summarise(value = if (first(stock)) sum_na(value[pe == months[1]]) else sum_na(value), .groups = "drop")
   wide_sheet(paste("Delivery", n_months, "months"),
              paste0("Service delivery: ", all_lab, " (monthly counts summed; On ART = value at ",
-                    mlab(months[1]), ") · Source: KHIS"), d12)
+                    mlab(months[1]), ") · Source: KHIS"), d12,
+             with(check |> left_join(select(del_cat, ix, stock), by = "ix") |>
+                    group_by(variable) |>
+                    summarise(k = if (first(stock)) sum_na(kenya[pe == months[1]]) else sum_na(kenya), .groups = "drop"),
+                  setNames(k, variable)))
   # long
   del_out <- dl |>
     left_join(select(del_cat, ix, `Data element code` = code), by = "ix") |>
@@ -1208,9 +1434,28 @@ if (add_delivery && !is.null(del_long)) {
   writeData(wb, "Delivery variables",
             del_cat |> transmute(`Programme area` = area, `Clean variable` = variable, Code = code,
                                  Type = ifelse(stock, "Cumulative (stock): use end-month value", "Monthly count: sum over months"),
-                                 `KHIS data element` = khis_name, UID = uid),
+                                 `KHIS name` = khis_name, `KHIS object` = khis_type,
+                                 `Matched by` = match_by, UID = uid),
             headerStyle = hs)
-  setColWidths(wb, "Delivery variables", cols = 1:6, widths = c(32, 48, 12, 36, 70, 14))
+  setColWidths(wb, "Delivery variables", cols = 1:8, widths = c(32, 48, 12, 36, 70, 12, 14, 14))
+  # data check
+  chk_out <- check |>
+    mutate(Period = mlab(pe)) |>
+    arrange(match(variable, del_cat$variable), desc(pe)) |>
+    transmute(Code = code, Variable = variable, Period, Month = pe,
+              `Map (sum of counties)` = map_kenya, `KHIS Kenya (direct)` = khis_kenya,
+              Difference = diff,
+              `KHIS export file` = if ("export_value" %in% names(check)) export_value else NA_real_,
+              Status = ifelse(abs(diff) <= 0.5 &
+                              (is.na(`KHIS export file`) | abs(coalesce(khis_kenya, 0) - `KHIS export file`) <= 0.5),
+                              "OK", "CHECK"))
+  addWorksheet(wb, "Data check")
+  writeData(wb, "Data check", chk_out, headerStyle = hs)
+  setColWidths(wb, "Data check", cols = 1:ncol(chk_out), widths = c(10, 46, 10, 9, 14, 14, 11, 14, 9))
+  conditionalFormatting(wb, "Data check", cols = ncol(chk_out), rows = 2:(nrow(chk_out) + 1),
+                        type = "contains", rule = "CHECK", style = createStyle(bgFill = "#F8CBAD"))
+  freezePane(wb, "Data check", firstRow = TRUE)
+  addFilter(wb, "Data check", rows = 1, cols = 1:ncol(chk_out))
 }
 saveWorkbook(wb, out_xlsx, overwrite = TRUE)
 message("Workbook saved: ", normalizePath(out_xlsx))
