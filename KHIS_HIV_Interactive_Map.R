@@ -86,6 +86,10 @@ map_title   <- "County-Level HIV Service Provision in Kenya"   # main title on t
 # and cached in outputs/natural_earth. Set add_water <- FALSE to switch off.
 add_water <- TRUE
 
+# Logos shown in the title banner (PNG files in a 'logos' folder next to this script)
+logo_moh    <- "logos/moh_logo.png"      # Ministry of Health, Republic of Kenya
+logo_nascop <- "logos/nascop_logo.png"   # NASCOP
+
 out_dir  <- "outputs"
 dir.create(out_dir, showWarnings = FALSE)
 out_html <- file.path(out_dir, "KHIS_HIV_Map_Service_Reporting.html")
@@ -402,7 +406,12 @@ js_nat <- setNames(lapply(services$key, function(s) {
   }), metrics$key)
 }), services$key)
 
+img_uri <- function(p) {
+  if (!file.exists(p)) { warning("Logo not found: ", p, " — banner shown without it."); return("") }
+  paste0("data:image/png;base64,", jsonlite::base64_enc(readBin(p, "raw", file.info(p)$size)))
+}
 js_data <- list(
+  logo_l = img_uri(logo_moh), logo_r = img_uri(logo_nascop),
   ous = ou_order, names = shp$ou_name, area = area_lab, title = map_title,
   lat = unname(lab_pts[, "Y"]), lng = unname(lab_pts[, "X"]),
   navy = navy, ramp = navy_ramp, target = rate_target, n_months = n_months,
@@ -458,10 +467,12 @@ map_css <- "
 .leaflet-popup-content{margin:10px 12px}
 .leaflet-container{background:#e9eff5}
 .kh-title{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1000;
-  pointer-events:none;text-align:center;background:rgba(255,255,255,.96);padding:9px 22px 8px;
+  pointer-events:none;text-align:center;background:rgba(255,255,255,.97);padding:8px 16px 7px;
   border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.2);border-bottom:4px solid #1F4E79;
-  font-family:'Segoe UI',Arial,sans-serif;max-width:44%;}
-.kh-title .t1{font-size:20px;font-weight:800;color:#1F4E79;letter-spacing:.01em;line-height:1.2}
+  font-family:'Segoe UI',Arial,sans-serif;max-width:60%;display:flex;align-items:center;gap:12px}
+.kh-title img{height:46px;width:auto;flex:none}
+.kh-title .tx{flex:1;min-width:0}
+.kh-title .t1{font-size:18px;font-weight:800;color:#1F4E79;line-height:1.2;white-space:nowrap}
 .kh-title .t2{font-size:13px;font-weight:600;color:#333;margin-top:3px}
 .kh-title .t3{font-size:11px;color:#777;margin-top:1px}
 .kh-lab{background:none;border:none}
@@ -587,9 +598,11 @@ function(el, x, D) {
   /* ---------- title banner ---------- */
   var tEl = L.DomUtil.create('div', 'kh-title', el);
   function setTitle() {
-    tEl.innerHTML = '<div class=\"t1\">' + D.title + '</div>' +
+    tEl.innerHTML = (D.logo_l ? '<img src=\"' + D.logo_l + '\" alt=\"Ministry of Health\">' : '') +
+      '<div class=\"tx\"><div class=\"t1\">' + D.title + '</div>' +
       '<div class=\"t2\">' + M().label + ' &nbsp;·&nbsp; ' + S().label + '</div>' +
-      '<div class=\"t3\">' + D.periods[st.p].label + ' &nbsp;·&nbsp; Source: KHIS (DHIS2)</div>';
+      '<div class=\"t3\">' + D.periods[st.p].label + ' &nbsp;·&nbsp; Source: KHIS (DHIS2)</div></div>' +
+      (D.logo_r ? '<img src=\"' + D.logo_r + '\" alt=\"NASCOP\">' : '');
   }
 
   /* ---------- area labels ---------- */
